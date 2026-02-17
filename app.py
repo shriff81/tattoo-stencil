@@ -13,7 +13,6 @@ st.title("AnGar Stencil Pro 🔴")
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # 1. Подготовка изображения
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -30,47 +29,54 @@ if uploaded_file:
     st.sidebar.subheader("Визуальный контроль")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
     
-    st.sidebar.subheader("Проработка деталей")
-    # shadow_boost - вытягивает те самые зеленые линии из вашего скриншота
-    shadow_boost = st.sidebar.slider("Усиление скрытых теней", 1, 50, 25)
-    noise_clean = st.sidebar.slider("Чистота (удаление пор)", 1, 10, 3)
-    edge_sens = st.sidebar.slider("Чувствительность контуров", 10, 250, 140)
+    st.sidebar.subheader("Сила анатомических линий")
+    # shadow_power - теперь это "магнит" для тех самых зеленых линий
+    shadow_power = st.sidebar.slider("Проработка мягких переходов", 1, 100, 45)
+    noise_filter = st.sidebar.slider("Чистота (удаление пор)", 1, 15, 5)
+    line_thickness = st.sidebar.slider("Толщина линии", 1, 3, 1)
 
-    # --- ПРОФЕССИОНАЛЬНЫЙ АЛГОРИТМ КОНТУРОВ ---
+    # --- АЛГОРИТМ RIDGE DETECTION ---
 
-    # А. Усиливаем локальный контраст (чтобы видеть детали в тенях)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    # 1. Усиление локальных деталей
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
     cl = clahe.apply(gray)
 
-    # Б. Удаляем шум, сохраняя резкость
-    smooth = cv2.bilateralFilter(cl, 9, 75, 75)
-    denoised = cv2.medianBlur(smooth, (noise_clean * 2 - 1) if noise_clean > 0 else 1)
+    # 2. Удаление пор (Bilateral filter)
+    smooth = cv2.bilateralFilter(cl, 9, noise_filter * 10, noise_filter * 10)
 
-    # В. Извлекаем "зеленые зоны" (тени и узкие детали) через Black Hat
-    kernel_size = 15
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
-    blackhat = cv2.morphologyEx(denoised, cv2.MORPH_BLACKHAT, kernel)
-    _, shadow_details = cv2.threshold(blackhat, 51 - (shadow_boost), 255, cv2.THRESH_BINARY)
-
-    # Г. Основной контур
-    edges = cv2.Canny(denoised, edge_sens // 2, edge_sens)
-
-    # Д. Объединение и СКЕЛЕТИЗАЦИЯ (схлопывание двойных линий)
-    combined = cv2.bitwise_or(edges, shadow_details)
+    # 3. Метод "Разности Гауссиан" (DoG) для поиска скрытых линий
+    # Это вытаскивает тени, которые вы пометили зеленым
+    g1 = cv2.GaussianBlur(smooth, (3, 3), 0)
+    g2 = cv2.GaussianBlur(smooth, (9, 9), 0)
+    dog = cv2.subtract(g1, g2)
     
-    # Математическое утончение до 1 пикселя
-    skeleton = np.zeros(combined.shape, np.uint8)
-    temp_combined = combined.copy()
-    skel_kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3))
+    # Порог для проявления линий
+    _, anatomical_lines = cv2.threshold(dog, 255 - shadow_power * 2.5, 255, cv2.THRESH_BINARY)
+
+    # 4. Схлопывание и утончение
+    kernel = np.ones((2,2), np.uint8)
+    # Соединяем микро-разрывы
+    connected = cv2.morphologyEx(anatomical_lines, cv2.MORPH_CLOSE, kernel)
     
-    # Цикл схлопывания жирных линий в тонкие
-    for _ in range(3): # 3 итерации достаточно для большинства тату-фото
-        eroded = cv2.erode(temp_combined, skel_kernel)
-        temp = cv2.dilate(eroded, skel_kernel)
-        temp = cv2.subtract(temp_combined, temp)
-        skeleton = cv2.bitwise_or(skeleton, temp)
-        temp_combined = eroded.copy()
-        if cv2.countNonZero(temp_combined) == 0: break
+    # Принудительно оставляем только тонкий центр (Skeletonization)
+    skeleton = np.zeros(connected.shape, np.uint8)
+    temp = connected.copy()
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3))
+    
+    while True:
+        eroded = cv2.erode(temp, element)
+        dilated = cv2.dilate(eroded, element)
+        diff = cv2.subtract(temp, dilated)
+        skeleton = cv2.bitwise_or(skeleton, diff)
+        temp = eroded.copy()
+        if cv2.countNonZero(temp) == 0:
+            break
+
+    # Финальная толщина
+    if line_thickness > 1:
+        final_edges = cv2.dilate(skeleton, np.ones((line_thickness, line_thickness), np.uint8))
+    else:
+        final_edges = skeleton
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -79,9 +85,9 @@ if uploaded_file:
     blended_bg = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     
     preview_img = blended_bg.copy()
-    preview_img[skeleton > 0] = selected_color
+    preview_img[final_edges > 0] = selected_color
 
-    st.image(preview_img, caption="Результат с усилением теней и тонким контуром", use_column_width=True)
+    st.image(preview_img, caption="Обновленный стенсил: Анатомические линии + Чистота", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
@@ -102,6 +108,6 @@ if uploaded_file:
         p.save()
         return buffer.getvalue()
 
-    pdf_data = create_pdf(skeleton, target_width_cm, selected_color)
+    pdf_data = create_pdf(final_edges, target_width_cm, selected_color)
     st.sidebar.download_button(label="📥 Скачать PDF", data=pdf_data, file_name="angar_stencil.pdf", mime="application/pdf")
     
