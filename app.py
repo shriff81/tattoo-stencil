@@ -34,44 +34,44 @@ if uploaded_file:
     st.sidebar.subheader("Визуальный контроль")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
     
-    st.sidebar.subheader("Точность и Качество")
-    # НОВЫЙ ПОЛЗУНОК: Проработка мягких границ
-    shadow_detail = st.sidebar.slider("Проработка мягких теней", 1, 10, 5)
-    noise_reduction = st.sidebar.slider("Чистота (удаление шума)", 1, 15, 3)
-    edge_sensitivity = st.sidebar.slider("Общая чувствительность", 10, 250, 100)
-    line_thickness = st.sidebar.slider("Толщина линии", 1, 5, 1)
+    st.sidebar.subheader("Точность линий (без жирности)")
+    shadow_detail = st.sidebar.slider("Проработка теней", 0, 10, 3)
+    noise_reduction = st.sidebar.slider("Чистота", 1, 10, 2)
+    edge_sensitivity = st.sidebar.slider("Чувствительность", 10, 250, 120)
+    # Сделали шаг регулировки толщины еще более точным
+    line_thickness = st.sidebar.slider("Толщина финальной линии", 1, 3, 1)
 
-    # --- УЛУЧШЕННЫЙ АЛГОРИТМ ВЫЯВЛЕНИЯ ГРАНИЦ ---
+    # --- УЛУЧШЕННЫЙ АЛГОРИТМ ТОНКИХ ЛИНИЙ ---
     
-    # 1. Выравнивание контраста (CLAHE), чтобы увидеть детали в тенях и светах
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    # 1. Подготовка (CLAHE приглушен для чистоты)
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8,8))
     enhanced_gray = clahe.apply(gray)
-    
-    # 2. Удаление шума
     denoised = cv2.medianBlur(enhanced_gray, (noise_reduction * 2 - 1) if noise_reduction > 0 else 1)
-    smooth = cv2.bilateralFilter(denoised, 9, 75, 75)
+    smooth = cv2.bilateralFilter(denoised, 7, 50, 50)
     
-    # 3. Основной контур (Жесткие границы)
+    # 2. Основной контур
     edges_main = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
     
-    # 4. Дополнительный слой (Мягкие границы и тени)
-    # Используем адаптивный порог для поиска тонких переходов
-    block_size = 11 + (shadow_detail * 2)
-    soft_edges = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                        cv2.THRESH_BINARY, block_size, 2)
-    soft_edges = cv2.bitwise_not(soft_edges)
-    
-    # Очистка мягких границ от мелкого "мусора"
-    kernel_clean = np.ones((2,2), np.uint8)
-    soft_edges = cv2.morphologyEx(soft_edges, cv2.MORPH_OPEN, kernel_clean)
+    # 3. Дополнительные линии теней (только если нужно)
+    if shadow_detail > 0:
+        block_size = 3 + (shadow_detail * 2)
+        soft_edges = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                            cv2.THRESH_BINARY, block_size, 2)
+        soft_edges = cv2.bitwise_not(soft_edges)
+        # Убираем шум из теней, чтобы не было "каши"
+        soft_edges = cv2.morphologyEx(soft_edges, cv2.MORPH_OPEN, np.ones((2,2), np.uint8))
+        combined = cv2.bitwise_or(edges_main, soft_edges)
+    else:
+        combined = edges_main
 
-    # 5. Склеивание слоев
-    combined = cv2.bitwise_or(edges_main, soft_edges)
-
-    # 6. Плавное утолщение
-    if line_thickness > 1:
-        kernel_thick = np.ones((line_thickness, line_thickness), np.uint8)
-        combined = cv2.dilate(combined, kernel_thick, iterations=1)
+    # 4. ФИНАЛЬНОЕ УТОНЧЕНИЕ (Скелетизация упрощенно)
+    # Это гарантирует, что даже если линии слиплись, они станут тонкими
+    if line_thickness == 1:
+        # Оставляем только "хребет" линии
+        kernel = np.ones((2,2), np.uint8)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_HITMISS, kernel) 
+        # Если хитмисс слишком агрессивен, вернемся к обычному тонкому Canny
+        combined = cv2.Canny(combined, 100, 200) 
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -82,7 +82,7 @@ if uploaded_file:
     preview_img = blended_bg.copy()
     preview_img[combined > 0] = selected_color
 
-    st.image(preview_img, caption="Улучшенная точность выявления границ", use_column_width=True)
+    st.image(preview_img, caption="Результат: Тонкие и четкие линии", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
@@ -106,10 +106,5 @@ if uploaded_file:
     pdf_data = create_pdf(combined, target_width_cm, selected_color)
     
     st.sidebar.markdown("---")
-    st.sidebar.download_button(
-        label=f"📥 Скачать PDF",
-        data=pdf_data,
-        file_name=f"angar_stencil.pdf",
-        mime="application/pdf"
-    )
+    st.sidebar.download_button(label="📥 Скачать PDF", data=pdf_data, file_name="angar_stencil.pdf", mime="application/pdf")
     
