@@ -21,13 +21,11 @@ if uploaded_file:
     st.sidebar.header("Настройки Мастера")
     target_width_cm = st.sidebar.number_input("Ширина печати (см)", 5.0, 30.0, 15.0)
     
-    # НОВЫЙ ВЫБОР ЦВЕТА
     stencil_color_name = st.sidebar.selectbox(
         "Цвет стенсила:",
         ["Ярко-красный", "Ярко-синий", "Ярко-зеленый", "Черный"]
     )
     
-    # Словарь цветов (RGB)
     colors_dict = {
         "Ярко-красный": [255, 0, 0],
         "Ярко-синий": [0, 0, 255],
@@ -39,29 +37,35 @@ if uploaded_file:
     st.sidebar.subheader("Визуальный контроль")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
     
-    st.sidebar.subheader("Тонкая настройка линий")
+    st.sidebar.subheader("Фильтрация деталей")
+    # НОВЫЙ ПОЛЗУНОК: Удаление пор и текстуры
+    noise_reduction = st.sidebar.slider("Чистота (удаление шума)", 1, 20, 5)
     edge_sensitivity = st.sidebar.slider("Чувствительность контуров", 10, 250, 120)
     line_thickness = st.sidebar.slider("Толщина линии", 1, 5, 1)
 
-    # 1. Генерация базового контура
-    smooth = cv2.bilateralFilter(gray, 7, 50, 50)
+    # 1. Удаление мелких шумов (пор кожи, текстуры)
+    # Используем медианный фильтр и Bilateral для сохранения границ
+    denoised = cv2.medianBlur(gray, (noise_reduction * 2 - 1) if noise_reduction > 0 else 1)
+    smooth = cv2.bilateralFilter(denoised, 9, 75, 75)
+    
+    # 2. Генерация контура
     edges = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
 
-    # 2. Плавное утолщение линий
+    # 3. Плавное утолщение линий
     if line_thickness > 1:
         kernel = np.ones((line_thickness, line_thickness), np.uint8)
         edges = cv2.dilate(edges, kernel, iterations=1)
 
-    # 3. Создание превью на БЕЛОМ фоне
+    # 4. Превью на БЕЛОМ фоне
     h, w = gray.shape
     alpha = bg_opacity / 100.0
     white_bg = np.ones((h, w, 3), dtype=np.uint8) * 255
     blended_bg = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     
     preview_img = blended_bg.copy()
-    preview_img[edges > 0] = selected_color # Накладываем выбранный цвет
+    preview_img[edges > 0] = selected_color
 
-    st.image(preview_img, caption=f"Стенсил: {stencil_color_name}", use_column_width=True)
+    st.image(preview_img, caption=f"Стенсил с фильтрацией шума", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
