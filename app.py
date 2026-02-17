@@ -13,7 +13,6 @@ st.title("AnGar Stencil Pro 🔴")
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # Загрузка и подготовка
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -22,39 +21,32 @@ if uploaded_file:
     target_width_cm = st.sidebar.number_input("Ширина печати (см)", 5.0, 30.0, 15.0)
     
     st.sidebar.subheader("Визуальный контроль")
-    # НОВЫЙ ПОЛЗУНОК: Прозрачность подложки
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
     
     st.sidebar.subheader("Тонкая настройка линий")
     edge_sensitivity = st.sidebar.slider("Чувствительность контуров", 10, 250, 120)
 
-    # 1. Генерация тонкого стенсила
+    # 1. Генерация стенсила
     smooth = cv2.bilateralFilter(gray, 7, 50, 50)
     edges = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
 
-    # 2. Создание наложения (Overlay) для экрана
-    # Создаем красный слой
+    # 2. Создание превью на БЕЛОМ фоне
     h, w = gray.shape
-    red_layer = np.zeros((h, w, 3), dtype=np.uint8)
-    red_layer[edges > 0] = [255, 0, 0] # Красные линии
-    
-    # Создаем маску линий
-    mask = (edges > 0).astype(np.float32)
-    
-    # Смешиваем оригинал и красный стенсил
-    # Чем выше bg_opacity, тем сильнее виден оригинал
     alpha = bg_opacity / 100.0
     
-    # Базовое изображение - оригинал, приглушенный яркостью
-    base_img = (img_array.astype(float) * alpha).astype(np.uint8)
+    # Создаем чисто белый холст
+    white_bg = np.ones((h, w, 3), dtype=np.uint8) * 255
     
-    # Накладываем красные линии (они всегда 100% непрозрачные поверх фото)
-    preview_img = base_img.copy()
+    # Смешиваем оригинал с белым фоном (эффект высветления)
+    blended_bg = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
+    
+    # Накладываем красные линии поверх высветленного оригинала
+    preview_img = blended_bg.copy()
     preview_img[edges > 0] = [255, 0, 0]
 
-    st.image(preview_img, caption="Контроль наложения стенсила на оригинал", use_column_width=True)
+    st.image(preview_img, caption="Контроль наложения (на белом фоне)", use_column_width=True)
 
-    # Функция PDF (всегда выдает чистый красный на белом)
+    # Функция PDF (чистый красный на белом)
     def create_pdf(edge_data, width_cm):
         h, w = edge_data.shape
         aspect = h / w
@@ -62,7 +54,6 @@ if uploaded_file:
         buffer = io.BytesIO()
         p = canvas.Canvas(buffer, pagesize=A4)
         
-        # Для печати всегда белый фон
         pdf_img_np = np.ones((h, w, 3), dtype=np.uint8) * 255
         pdf_img_np[edge_data > 0] = [255, 0, 0]
         
