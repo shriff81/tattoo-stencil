@@ -13,7 +13,6 @@ st.title("AnGar Stencil Pro 🎨")
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # Загрузка
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -27,45 +26,63 @@ if uploaded_file:
     )
     
     colors_dict = {
-        "Ярко-красный": [255, 0, 0],
-        "Ярко-синий": [0, 0, 255],
-        "Ярко-зеленый": [0, 255, 0],
-        "Черный": [0, 0, 0]
+        "Ярко-красный": [255, 0, 0], "Ярко-синий": [0, 0, 255],
+        "Ярко-зеленый": [0, 255, 0], "Черный": [0, 0, 0]
     }
     selected_color = colors_dict[stencil_color_name]
 
     st.sidebar.subheader("Визуальный контроль")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
     
-    st.sidebar.subheader("Фильтрация деталей")
-    # НОВЫЙ ПОЛЗУНОК: Удаление пор и текстуры
-    noise_reduction = st.sidebar.slider("Чистота (удаление шума)", 1, 20, 5)
-    edge_sensitivity = st.sidebar.slider("Чувствительность контуров", 10, 250, 120)
+    st.sidebar.subheader("Точность и Качество")
+    # НОВЫЙ ПОЛЗУНОК: Проработка мягких границ
+    shadow_detail = st.sidebar.slider("Проработка мягких теней", 1, 10, 5)
+    noise_reduction = st.sidebar.slider("Чистота (удаление шума)", 1, 15, 3)
+    edge_sensitivity = st.sidebar.slider("Общая чувствительность", 10, 250, 100)
     line_thickness = st.sidebar.slider("Толщина линии", 1, 5, 1)
 
-    # 1. Удаление мелких шумов (пор кожи, текстуры)
-    # Используем медианный фильтр и Bilateral для сохранения границ
-    denoised = cv2.medianBlur(gray, (noise_reduction * 2 - 1) if noise_reduction > 0 else 1)
+    # --- УЛУЧШЕННЫЙ АЛГОРИТМ ВЫЯВЛЕНИЯ ГРАНИЦ ---
+    
+    # 1. Выравнивание контраста (CLAHE), чтобы увидеть детали в тенях и светах
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enhanced_gray = clahe.apply(gray)
+    
+    # 2. Удаление шума
+    denoised = cv2.medianBlur(enhanced_gray, (noise_reduction * 2 - 1) if noise_reduction > 0 else 1)
     smooth = cv2.bilateralFilter(denoised, 9, 75, 75)
     
-    # 2. Генерация контура
-    edges = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
+    # 3. Основной контур (Жесткие границы)
+    edges_main = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
+    
+    # 4. Дополнительный слой (Мягкие границы и тени)
+    # Используем адаптивный порог для поиска тонких переходов
+    block_size = 11 + (shadow_detail * 2)
+    soft_edges = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                        cv2.THRESH_BINARY, block_size, 2)
+    soft_edges = cv2.bitwise_not(soft_edges)
+    
+    # Очистка мягких границ от мелкого "мусора"
+    kernel_clean = np.ones((2,2), np.uint8)
+    soft_edges = cv2.morphologyEx(soft_edges, cv2.MORPH_OPEN, kernel_clean)
 
-    # 3. Плавное утолщение линий
+    # 5. Склеивание слоев
+    combined = cv2.bitwise_or(edges_main, soft_edges)
+
+    # 6. Плавное утолщение
     if line_thickness > 1:
-        kernel = np.ones((line_thickness, line_thickness), np.uint8)
-        edges = cv2.dilate(edges, kernel, iterations=1)
+        kernel_thick = np.ones((line_thickness, line_thickness), np.uint8)
+        combined = cv2.dilate(combined, kernel_thick, iterations=1)
 
-    # 4. Превью на БЕЛОМ фоне
+    # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
     alpha = bg_opacity / 100.0
     white_bg = np.ones((h, w, 3), dtype=np.uint8) * 255
     blended_bg = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     
     preview_img = blended_bg.copy()
-    preview_img[edges > 0] = selected_color
+    preview_img[combined > 0] = selected_color
 
-    st.image(preview_img, caption=f"Стенсил с фильтрацией шума", use_column_width=True)
+    st.image(preview_img, caption="Улучшенная точность выявления границ", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
@@ -74,28 +91,25 @@ if uploaded_file:
         height_cm = width_cm * aspect
         buffer = io.BytesIO()
         p = canvas.Canvas(buffer, pagesize=A4)
-        
         pdf_img_np = np.ones((h, w, 3), dtype=np.uint8) * 255
         pdf_img_np[edge_data > 0] = color_rgb
-        
         temp_img = Image.fromarray(pdf_img_np)
         img_byte_arr = io.BytesIO()
         temp_img.save(img_byte_arr, format='PNG')
         img_byte_arr.seek(0)
-        
         from reportlab.lib.utils import ImageReader
         p.drawImage(ImageReader(img_byte_arr), 1*cm, (29.7 - height_cm - 1)*cm, width=width_cm*cm, height=height_cm*cm)
         p.showPage()
         p.save()
         return buffer.getvalue()
 
-    pdf_data = create_pdf(edges, target_width_cm, selected_color)
+    pdf_data = create_pdf(combined, target_width_cm, selected_color)
     
     st.sidebar.markdown("---")
     st.sidebar.download_button(
-        label=f"📥 Скачать PDF ({stencil_color_name})",
+        label=f"📥 Скачать PDF",
         data=pdf_data,
-        file_name=f"angar_stencil_{stencil_color_name}.pdf",
+        file_name=f"angar_stencil.pdf",
         mime="application/pdf"
     )
     
