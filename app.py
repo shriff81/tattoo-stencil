@@ -13,6 +13,7 @@ st.title("AnGar Stencil Pro 🔴")
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
+    # 1. Загрузка и первичная обработка
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -29,44 +30,45 @@ if uploaded_file:
     st.sidebar.subheader("Визуальный контроль")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 40)
     
-    st.sidebar.subheader("Логика ручного стенсила")
-    # shadow_depth - находит те самые "зеленые зоны" анатомии
-    shadow_depth = st.sidebar.slider("Глубина анатомии (Shadows)", 1, 100, 40)
-    cleanliness = st.sidebar.slider("Чистота (удаление текстуры)", 1, 20, 7)
-    # line_precision - делает линии острыми
-    line_precision = st.sidebar.slider("Острота линий", 1, 5, 1)
+    st.sidebar.subheader("Логика ручной отрисовки")
+    # Анатомия - вытягивает те самые зеленые зоны
+    anatomy_boost = st.sidebar.slider("Проработка анатомии", 1, 100, 40)
+    # Чистота - убирает поры кожи
+    noise_clean = st.sidebar.slider("Чистота (удаление текстуры)", 1, 20, 8)
+    # Острота - контролирует толщину
+    line_sharpness = st.sidebar.slider("Острота линий", 1, 5, 1)
 
-    # --- АЛГОРИТМ "АНАТОМИЧЕСКИЙ СКЕЛЕТ" ---
+    # --- АЛГОРИТМ "АНАТОМИЧЕСКИЙ ГРАДИЕНТ" ---
 
-    # 1. Подготовка: Усиливаем детали в тенях (CLAHE)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    # А. Усиление деталей в тенях
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
     cl = clahe.apply(gray)
 
-    # 2. Мощное сглаживание текстуры (пор, зерна) при сохранении контуров
-    smooth = cv2.bilateralFilter(cl, 9, cleanliness * 10, cleanliness * 10)
+    # Б. Сглаживание пор и шума
+    smooth = cv2.bilateralFilter(cl, 9, noise_clean * 10, noise_clean * 10)
 
-    # 3. Детектор хребтов (Ridge Detection через Laplacian)
-    # Этот метод ищет центр тени, а не её края (решает проблему дублирования)
-    laplacian = cv2.Laplacian(smooth, cv2.CV_64F, ksize=3)
-    laplacian = np.uint8(np.absolute(laplacian))
+    # В. Извлечение "хребтов" теней (Ridge Detection)
+    # Используем разницу размытий (DoG) для поиска центральных осей теней
+    g1 = cv2.GaussianBlur(smooth, (3, 3), 0)
+    g2 = cv2.GaussianBlur(smooth, (15, 15), 0)
+    dog = cv2.subtract(g1, g2)
     
-    # Адаптивный порог для выделения линий
-    block_size = 11
-    thresh_val = 255 - (shadow_depth * 2)
-    _, lines = cv2.threshold(laplacian, thresh_val, 255, cv2.THRESH_BINARY)
+    # Порог проявления линий
+    _, ridges = cv2.threshold(dog, 255 - (anatomy_boost * 2), 255, cv2.THRESH_BINARY)
 
-    # 4. Скелетизация (превращаем в 1 пиксель)
-    # Используем морфологическое истончение
-    kernel = np.ones((3,3), np.uint8)
-    skeleton = cv2.erode(lines, kernel, iterations=1)
-    # Дополнительная очистка от мелких точек-шума
-    skeleton = cv2.morphologyEx(skeleton, cv2.MORPH_OPEN, kernel)
+    # Г. Устранение двойных линий и соединение разрывов
+    kernel = np.ones((2,2), np.uint8)
+    # Соединяем разрывы (Closing)
+    closed = cv2.morphologyEx(ridges, cv2.MORPH_CLOSE, kernel, iterations=1)
+    
+    # Безопасное утончение (не удаляет линии целиком)
+    skeleton = cv2.erode(closed, kernel, iterations=1)
+    # Финальный контур через Canny для идеальной остроты
+    final_stencil = cv2.Canny(skeleton, 50, 150)
 
-    # 5. Итоговый контур
-    if line_precision > 1:
-        final_edges = cv2.dilate(skeleton, np.ones((line_precision, line_precision), np.uint8))
-    else:
-        final_edges = skeleton
+    # Д. Регулировка толщины
+    if line_sharpness > 1:
+        final_stencil = cv2.dilate(final_stencil, np.ones((line_sharpness, line_sharpness), np.uint8))
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -75,9 +77,9 @@ if uploaded_file:
     blended_bg = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     
     preview_img = blended_bg.copy()
-    preview_img[final_edges > 0] = selected_color
+    preview_img[final_stencil > 0] = selected_color
 
-    st.image(preview_img, caption="Автоматический стенсил по логике ручной отрисовки", use_column_width=True)
+    st.image(preview_img, caption="Стенсил по твоей ручной логике", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
@@ -98,6 +100,6 @@ if uploaded_file:
         p.save()
         return buffer.getvalue()
 
-    pdf_data = create_pdf(final_edges, target_width_cm, selected_color)
+    pdf_data = create_pdf(final_stencil, target_width_cm, selected_color)
     st.sidebar.download_button(label="📥 Скачать PDF", data=pdf_data, file_name="angar_stencil.pdf", mime="application/pdf")
     
