@@ -8,7 +8,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 
 st.set_page_config(page_title="AnGar Stencil Pro", layout="wide")
-st.title("AnGar Stencil Pro 🔴")
+st.title("AnGar Stencil Pro 🎨")
 
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
@@ -31,38 +31,48 @@ if uploaded_file:
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 40)
     
     st.sidebar.subheader("Логика ручной отрисовки")
-    # shadow_boost - вытягивает те самые "зеленые зоны"
-    shadow_boost = st.sidebar.slider("Проработка теней (Anatomy)", 1, 100, 50)
-    noise_clean = st.sidebar.slider("Чистота (удаление текстур)", 1, 20, 10)
+    # shadow_sense - вытягивает те самые зеленые зоны анатомии
+    shadow_sense = st.sidebar.slider("Детализация анатомии", 1, 100, 45)
+    # clean_level - удаляет те самые "точки"
+    clean_level = st.sidebar.slider("Чистка от мусора (точек)", 1, 50, 15)
+    # line_weight - делает линию увереннее
     line_weight = st.sidebar.slider("Толщина линии", 1, 3, 1)
 
-    # --- АЛГОРИТМ "SINGLE RIDGE" (Одиночная линия) ---
+    # --- АЛГОРИТМ "СВЯЗНЫЙ КОНТУР" ---
 
-    # А. Усиливаем детали в тенях (CLAHE)
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
+    # А. Подготовка и усиление теней
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     cl = clahe.apply(gray)
+    smooth = cv2.bilateralFilter(cl, 9, 75, 75)
 
-    # Б. Сглаживание пор и шума (очень сильный Bilateral)
-    # Это превращает кожу в гладкий пластик, оставляя только анатомию
-    smooth = cv2.bilateralFilter(cl, 9, noise_clean * 12, noise_clean * 12)
-
-    # В. Адаптивный поиск "центра" тени (без Canny!)
-    # Этот блок ищет только темные "хребты", создавая одиночные линии
-    block_size = 11
-    # Константа регулирует чувствительность к мягким теням
-    constant = (100 - shadow_boost) / 5
-    
+    # Б. Выделение "хребтов" теней
+    block_size = 13
+    constant = (100 - shadow_sense) / 5
     binary = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                     cv2.THRESH_BINARY, block_size, constant)
-    
-    # Инвертируем, чтобы получить линии
     lines = cv2.bitwise_not(binary)
 
-    # Г. Очистка от "зерна" (MORPH_OPEN)
-    kernel = np.ones((2,2), np.uint8)
-    final_stencil = cv2.morphologyEx(lines, cv2.MORPH_OPEN, kernel)
+    # В. СКЛЕИВАНИЕ ТОЧЕК В ЛИНИИ
+    # Используем морфологию для соединения разрывов
+    kernel_connect = np.ones((2,2), np.uint8)
+    connected = cv2.morphologyEx(lines, cv2.MORPH_CLOSE, kernel_connect)
 
-    # Д. Тонкая настройка веса линии
+    # Г. УДАЛЕНИЕ МЕЛКИХ ОБЪЕКТОВ (ТОЧЕК)
+    # Находим все отдельные элементы
+    nb_components, output, stats, centroids = cv2.connectedComponentsWithStats(connected, connectivity=8)
+    # Создаем пустой холст
+    cleaned_lines = np.zeros(connected.shape, dtype=np.uint8)
+    
+    # Оставляем только те элементы, которые достаточно длинные/большие
+    for i in range(1, nb_components):
+        if stats[i, cv2.CC_STAT_AREA] >= clean_level:
+            cleaned_lines[output == i] = 255
+
+    # Д. ФИНАЛЬНОЕ УТОНЧЕНИЕ
+    # Чтобы линии не были жирными, но и не превращались в точки
+    final_stencil = cv2.erode(cleaned_lines, np.ones((2,2), np.uint8), iterations=1)
+    final_stencil = cv2.Canny(final_stencil, 50, 150)
+
     if line_weight > 1:
         final_stencil = cv2.dilate(final_stencil, np.ones((line_weight, line_weight), np.uint8))
 
@@ -75,7 +85,7 @@ if uploaded_file:
     preview_img = blended_bg.copy()
     preview_img[final_stencil > 0] = selected_color
 
-    st.image(preview_img, caption="Готовый стенсил (логика одиночной линии)", use_column_width=True)
+    st.image(preview_img, caption="Стенсил без мусора и точек", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
