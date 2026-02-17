@@ -8,12 +8,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 
 st.set_page_config(page_title="AnGar Stencil Pro", layout="wide")
-st.title("AnGar Stencil Pro 🎨")
+st.title("AnGar Stencil Pro 🔴")
 
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # 1. Загрузка
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -30,51 +29,50 @@ if uploaded_file:
     st.sidebar.subheader("Визуальный контроль")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 40)
     
-    st.sidebar.subheader("Логика ручной отрисовки")
-    # shadow_sense - вытягивает те самые зеленые зоны анатомии
-    shadow_sense = st.sidebar.slider("Детализация анатомии", 1, 100, 45)
-    # clean_level - удаляет те самые "точки"
-    clean_level = st.sidebar.slider("Чистка от мусора (точек)", 1, 50, 15)
-    # line_weight - делает линию увереннее
-    line_weight = st.sidebar.slider("Толщина линии", 1, 3, 1)
+    st.sidebar.subheader("Логика отрисовки")
+    # shadow_boost - отвечает за те самые "зеленые зоны"
+    shadow_boost = st.sidebar.slider("Проработка анатомии (Shadows)", 1, 100, 50)
+    # connectivity - склеивает точки в линии
+    connectivity = st.sidebar.slider("Связность линий (убирает точки)", 1, 5, 2)
+    # clean_level - удаляет мелкий мусор
+    clean_level = st.sidebar.slider("Чистота (удаление мусора)", 1, 50, 15)
 
-    # --- АЛГОРИТМ "СВЯЗНЫЙ КОНТУР" ---
+    # --- АЛГОРИТМ "MEDIAL AXIS" (ЦЕНТРАЛЬНАЯ ЛИНИЯ) ---
 
-    # А. Подготовка и усиление теней
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    cl = clahe.apply(gray)
-    smooth = cv2.bilateralFilter(cl, 9, 75, 75)
+    # 1. Подготовка и усиление деталей
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(gray)
+    smooth = cv2.bilateralFilter(enhanced, 9, 75, 75)
 
-    # Б. Выделение "хребтов" теней
-    block_size = 13
-    constant = (100 - shadow_sense) / 5
+    # 2. Выделение зон теней (анатомии)
+    block_size = 15
+    # Константа регулирует "впитывание" теней
+    const = (100 - shadow_boost) / 5
     binary = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                    cv2.THRESH_BINARY, block_size, constant)
-    lines = cv2.bitwise_not(binary)
+                                    cv2.THRESH_BINARY, block_size, const)
+    binary = cv2.bitwise_not(binary)
 
-    # В. СКЛЕИВАНИЕ ТОЧЕК В ЛИНИИ
-    # Используем морфологию для соединения разрывов
-    kernel_connect = np.ones((2,2), np.uint8)
-    connected = cv2.morphologyEx(lines, cv2.MORPH_CLOSE, kernel_connect)
-
-    # Г. УДАЛЕНИЕ МЕЛКИХ ОБЪЕКТОВ (ТОЧЕК)
-    # Находим все отдельные элементы
-    nb_components, output, stats, centroids = cv2.connectedComponentsWithStats(connected, connectivity=8)
-    # Создаем пустой холст
-    cleaned_lines = np.zeros(connected.shape, dtype=np.uint8)
+    # 3. СКЛЕИВАНИЕ ПУНКТИРА (Превращаем точки в линии)
+    # Сначала расширяем, чтобы точки соприкоснулись
+    kernel_conn = np.ones((connectivity, connectivity), np.uint8)
+    dilated = cv2.dilate(binary, kernel_conn, iterations=1)
     
-    # Оставляем только те элементы, которые достаточно длинные/большие
+    # 4. УДАЛЕНИЕ МУСОРА
+    nb_components, output, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
+    solid_lines = np.zeros(dilated.shape, dtype=np.uint8)
     for i in range(1, nb_components):
         if stats[i, cv2.CC_STAT_AREA] >= clean_level:
-            cleaned_lines[output == i] = 255
+            solid_lines[output == i] = 255
 
-    # Д. ФИНАЛЬНОЕ УТОНЧЕНИЕ
-    # Чтобы линии не были жирными, но и не превращались в точки
-    final_stencil = cv2.erode(cleaned_lines, np.ones((2,2), np.uint8), iterations=1)
+    # 5. ИСТОНЧЕНИЕ (Skeletonization через Distance Transform)
+    # Находим центры получившихся форм
+    dist = cv2.distanceTransform(solid_lines, cv2.DIST_L2, 3)
+    # Оставляем только "гребень" дистанции (самую середину линии)
+    _, skeleton = cv2.threshold(dist, 0.4 * dist.max() if dist.max() > 0 else 0, 255, cv2.THRESH_BINARY)
+    final_stencil = skeleton.astype(np.uint8)
+    
+    # Делаем финальный контур острым через Canny
     final_stencil = cv2.Canny(final_stencil, 50, 150)
-
-    if line_weight > 1:
-        final_stencil = cv2.dilate(final_stencil, np.ones((line_weight, line_weight), np.uint8))
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -85,9 +83,9 @@ if uploaded_file:
     preview_img = blended_bg.copy()
     preview_img[final_stencil > 0] = selected_color
 
-    st.image(preview_img, caption="Стенсил без мусора и точек", use_column_width=True)
+    st.image(preview_img, caption="Чистые анатомические линии (без точек и дублей)", use_column_width=True)
 
-    # Функция PDF
+    # PDF Функция
     def create_pdf(edge_data, width_cm, color_rgb):
         h, w = edge_data.shape
         aspect = h / w
