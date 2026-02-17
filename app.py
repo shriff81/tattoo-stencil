@@ -21,37 +21,38 @@ if uploaded_file:
     target_width_cm = st.sidebar.number_input("Ширина печати (см)", 5.0, 30.0, 15.0)
     bg_mode = st.sidebar.radio("Фон стенсила:", ["Белый (для печати)", "Прозрачный"])
     
-    st.sidebar.subheader("Устранение двойных линий")
-    # Этот ползунок поможет убрать "обводку обводки"
-    line_fusion = st.sidebar.slider("Слияние двойных линий", 1, 5, 2)
-    edge_sensitivity = st.sidebar.slider("Чувствительность", 10, 250, 150)
+    st.sidebar.subheader("Детализация")
+    # Увеличил диапазон, чтобы вы могли "вытащить" даже самые мелкие детали
+    sensitivity = st.sidebar.slider("Чувствительность к мелким деталям", 3, 25, 9, step=2)
 
-    # 1. Подготовка: Убираем мелкий шум, который дает двойные контуры
-    smooth = cv2.GaussianBlur(gray, (5, 5), 0)
+    # 1. Подготовка фото (убираем шум, сохраняя резкость)
+    smooth = cv2.bilateralFilter(gray, 7, 50, 50)
     
-    # 2. Поиск границ
-    edges = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
+    # 2. Адаптивный метод (ищет линии, а не двойные границы)
+    # Это позволяет избежать "обводки контура"
+    thresh = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY, sensitivity, 2)
     
-    # 3. МОРФОЛОГИЯ: Схлопываем двойные линии в одну
-    kernel = np.ones((line_fusion, line_fusion), np.uint8)
-    # Сначала расширяем линии, чтобы они слились в одну толстую
-    dilated = cv2.dilate(edges, kernel, iterations=1)
-    # Затем сужаем их обратно до центральной оси (скелетизация упрощенно)
-    final_edges = cv2.erode(dilated, kernel, iterations=1)
+    # Инвертируем, чтобы получить линии
+    lines = cv2.bitwise_not(thresh)
+    
+    # Небольшая очистка от "мусора" (одиночных пикселей)
+    kernel = np.ones((2,2), np.uint8)
+    final_edges = cv2.morphologyEx(lines, cv2.MORPH_OPEN, kernel)
 
-    # 4. Создание Красного Стенсила
+    # 3. Создание финального изображения
     h, w = gray.shape
     if bg_mode == "Белый (для печати)":
         final_view = np.ones((h, w, 3), dtype=np.uint8) * 255
-        final_view[final_edges > 0] = [255, 0, 0]
+        final_view[final_edges > 0] = [255, 0, 0] # Ярко-красный
     else:
         final_view = np.zeros((h, w, 4), dtype=np.uint8)
         final_view[final_edges > 0] = [255, 0, 0, 255]
 
-    st.image(final_view, caption="Результат без двойных контуров", use_column_width=True)
+    st.image(final_view, caption="Красный стенсил", use_column_width=True)
 
-    # PDF Функция (без изменений в логике, только обновленный final_edges)
-    def create_pdf(img_np, width_cm, is_transparent, edge_data):
+    # PDF Функция
+    def create_pdf(edge_data, width_cm):
         h, w = edge_data.shape
         aspect = h / w
         height_cm = width_cm * aspect
@@ -67,12 +68,13 @@ if uploaded_file:
         img_byte_arr.seek(0)
         
         from reportlab.lib.utils import ImageReader
+        # Центрируем на листе
         p.drawImage(ImageReader(img_byte_arr), 1*cm, (29.7 - height_cm - 1)*cm, width=width_cm*cm, height=height_cm*cm)
         p.showPage()
         p.save()
         return buffer.getvalue()
 
-    pdf_data = create_pdf(final_view, target_width_cm, bg_mode == "Прозрачный", final_edges)
+    pdf_data = create_pdf(final_edges, target_width_cm)
     
     st.download_button(
         label="📥 Скачать КРАСНЫЙ PDF (1:1)",
