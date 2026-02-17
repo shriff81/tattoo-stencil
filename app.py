@@ -35,42 +35,34 @@ if uploaded_file:
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
     
     st.sidebar.subheader("Геометрия линий")
-    # Увеличиваем этот параметр, чтобы найти потерянные тени
-    shadow_depth = st.sidebar.slider("Глубина поиска теней", 1, 50, 25)
-    edge_force = st.sidebar.slider("Четкость контура", 10, 250, 150)
-    line_thickness = st.sidebar.slider("Толщина линии", 1, 3, 1)
+    # shadow_detail теперь работает точечно, не создавая жирности
+    shadow_detail = st.sidebar.slider("Проработка теней", 0, 10, 2)
+    noise_reduction = st.sidebar.slider("Чистота (удаление пор)", 1, 10, 3)
+    edge_sensitivity = st.sidebar.slider("Чувствительность", 10, 250, 150)
 
-    # --- НОВЫЙ АЛГОРИТМ: СХЛОПЫВАНИЕ ДВОЙНЫХ ЛИНИЙ + ТЕНИ ---
+    # --- АЛГОРИТМ ЧИСТОГО КОНТУРА ---
     
-    # 1. Выравнивание освещения для проявления деталей
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    cl = clahe.apply(gray)
+    # 1. Удаление пор и шума (Сильный Bilateral Filter)
+    smooth = cv2.bilateralFilter(gray, 9, noise_reduction * 15, noise_reduction * 15)
     
-    # 2. Поиск границ с защитой от разрывов
-    blur = cv2.GaussianBlur(cl, (5, 5), 0)
-    edges = cv2.Canny(blur, edge_force // 2, edge_force)
+    # 2. Поиск границ (Canny)
+    edges = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
     
-    # 3. Выделение зон теней (обводка элементов)
-    shadow_mask = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                        cv2.THRESH_BINARY, 21, shadow_depth // 5)
-    shadow_lines = cv2.Canny(shadow_mask, 10, 50)
-    
-    # Объединяем слои
-    combined = cv2.bitwise_or(edges, shadow_lines)
-    
-    # 4. ФИНАЛЬНОЕ РЕШЕНИЕ ПРОБЛЕМЫ ДУБЛИРОВАНИЯ (Скелетизация)
-    # Мы превращаем любую область в линию толщиной 1 пиксель
-    kernel = np.ones((3,3), np.uint8)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel) # Соединяем разрывы
-    
-    # Используем Zhang-Suen алгоритм для схлопывания двойных линий в одну
-    skeleton = cv2.ximgproc.thinning(combined)
-
-    if line_thickness > 1:
-        kernel_thick = np.ones((line_thickness, line_thickness), np.uint8)
-        final_edges = cv2.dilate(skeleton, kernel_thick, iterations=1)
+    # 3. Добавление деталей теней без дублирования
+    if shadow_detail > 0:
+        # Используем Laplacian для поиска центра теней
+        laplacian = cv2.Laplacian(smooth, cv2.CV_64F)
+        laplacian = np.uint8(np.absolute(laplacian))
+        _, shadow_edges = cv2.threshold(laplacian, 255 - (shadow_detail * 20), 255, cv2.THRESH_BINARY)
+        combined = cv2.bitwise_or(edges, shadow_edges)
     else:
-        final_edges = skeleton
+        combined = edges
+
+    # 4. ФИНАЛЬНОЕ УТОНЧЕНИЕ (Skeletonization)
+    # Схлопываем любые намеки на двойные линии в одну центральную трассу
+    kernel = np.ones((2,2), np.uint8)
+    final_edges = cv2.morphologyEx(combined, cv2.MORPH_ERODE, kernel)
+    final_edges = cv2.Canny(final_edges, 100, 200) # Оставляем только финальный резкий пиксель
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -81,7 +73,7 @@ if uploaded_file:
     preview_img = blended_bg.copy()
     preview_img[final_edges > 0] = selected_color
 
-    st.image(preview_img, caption="Исправленный стенсил: одна линия и глубокие тени", use_column_width=True)
+    st.image(preview_img, caption="Результат: Чистый стенсил", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
@@ -103,5 +95,7 @@ if uploaded_file:
         return buffer.getvalue()
 
     pdf_data = create_pdf(final_edges, target_width_cm, selected_color)
+    
+    st.sidebar.markdown("---")
     st.sidebar.download_button(label="📥 Скачать PDF", data=pdf_data, file_name="angar_stencil.pdf", mime="application/pdf")
     
