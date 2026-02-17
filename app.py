@@ -34,35 +34,36 @@ if uploaded_file:
     st.sidebar.subheader("Визуальный контроль")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
     
-    st.sidebar.subheader("Геометрия линий")
-    # shadow_detail теперь работает точечно, не создавая жирности
-    shadow_detail = st.sidebar.slider("Проработка теней", 0, 10, 2)
+    st.sidebar.subheader("Настройка линий")
+    # shadow_detail теперь добавляет линии там, где их не было
+    shadow_detail = st.sidebar.slider("Добавить детали теней", 0, 10, 3)
+    # noise_reduction убирает поры
     noise_reduction = st.sidebar.slider("Чистота (удаление пор)", 1, 10, 3)
-    edge_sensitivity = st.sidebar.slider("Чувствительность", 10, 250, 150)
+    edge_sensitivity = st.sidebar.slider("Чувствительность", 10, 250, 130)
 
-    # --- АЛГОРИТМ ЧИСТОГО КОНТУРА ---
+    # --- АЛГОРИТМ ЧИСТЫХ ЛИНИЙ ---
     
-    # 1. Удаление пор и шума (Сильный Bilateral Filter)
+    # 1. Сглаживание пор (очень важно для реализма)
+    # Bilateral filter сохраняет границы, но размывает кожу
     smooth = cv2.bilateralFilter(gray, 9, noise_reduction * 15, noise_reduction * 15)
     
-    # 2. Поиск границ (Canny)
+    # 2. Основной контур (Canny - он лучше всего держит одну линию)
     edges = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
     
-    # 3. Добавление деталей теней без дублирования
+    # 3. Достаем потерянные тени
     if shadow_detail > 0:
-        # Используем Laplacian для поиска центра теней
-        laplacian = cv2.Laplacian(smooth, cv2.CV_64F)
-        laplacian = np.uint8(np.absolute(laplacian))
-        _, shadow_edges = cv2.threshold(laplacian, 255 - (shadow_detail * 20), 255, cv2.THRESH_BINARY)
-        combined = cv2.bitwise_or(edges, shadow_edges)
+        # Ищем области с мягким перепадом яркости
+        grad_x = cv2.Sobel(smooth, cv2.CV_16S, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(smooth, cv2.CV_16S, 0, 1, ksize=3)
+        abs_grad_x = cv2.convertScaleAbs(grad_x)
+        abs_grad_y = cv2.convertScaleAbs(grad_y)
+        grad = cv2.addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0)
+        
+        # Обводим только значимые переходы теней
+        _, shadow_lines = cv2.threshold(grad, 255 - (shadow_detail * 20), 255, cv2.THRESH_BINARY)
+        final_stencil = cv2.bitwise_or(edges, shadow_lines)
     else:
-        combined = edges
-
-    # 4. ФИНАЛЬНОЕ УТОНЧЕНИЕ (Skeletonization)
-    # Схлопываем любые намеки на двойные линии в одну центральную трассу
-    kernel = np.ones((2,2), np.uint8)
-    final_edges = cv2.morphologyEx(combined, cv2.MORPH_ERODE, kernel)
-    final_edges = cv2.Canny(final_edges, 100, 200) # Оставляем только финальный резкий пиксель
+        final_stencil = edges
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -71,9 +72,9 @@ if uploaded_file:
     blended_bg = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     
     preview_img = blended_bg.copy()
-    preview_img[final_edges > 0] = selected_color
+    preview_img[final_stencil > 0] = selected_color
 
-    st.image(preview_img, caption="Результат: Чистый стенсил", use_column_width=True)
+    st.image(preview_img, caption="Стенсил готов", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
@@ -94,7 +95,7 @@ if uploaded_file:
         p.save()
         return buffer.getvalue()
 
-    pdf_data = create_pdf(final_edges, target_width_cm, selected_color)
+    pdf_data = create_pdf(final_stencil, target_width_cm, selected_color)
     
     st.sidebar.markdown("---")
     st.sidebar.download_button(label="📥 Скачать PDF", data=pdf_data, file_name="angar_stencil.pdf", mime="application/pdf")
