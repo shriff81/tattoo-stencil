@@ -13,7 +13,7 @@ st.title("AnGar Stencil Pro 🔴")
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # 1. Загрузка и первичная обработка
+    # 1. Загрузка
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -31,44 +31,40 @@ if uploaded_file:
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 40)
     
     st.sidebar.subheader("Логика ручной отрисовки")
-    # Анатомия - вытягивает те самые зеленые зоны
-    anatomy_boost = st.sidebar.slider("Проработка анатомии", 1, 100, 40)
-    # Чистота - убирает поры кожи
-    noise_clean = st.sidebar.slider("Чистота (удаление текстуры)", 1, 20, 8)
-    # Острота - контролирует толщину
-    line_sharpness = st.sidebar.slider("Острота линий", 1, 5, 1)
+    # shadow_boost - вытягивает те самые "зеленые зоны"
+    shadow_boost = st.sidebar.slider("Проработка теней (Anatomy)", 1, 100, 50)
+    noise_clean = st.sidebar.slider("Чистота (удаление текстур)", 1, 20, 10)
+    line_weight = st.sidebar.slider("Толщина линии", 1, 3, 1)
 
-    # --- АЛГОРИТМ "АНАТОМИЧЕСКИЙ ГРАДИЕНТ" ---
+    # --- АЛГОРИТМ "SINGLE RIDGE" (Одиночная линия) ---
 
-    # А. Усиление деталей в тенях
+    # А. Усиливаем детали в тенях (CLAHE)
     clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
     cl = clahe.apply(gray)
 
-    # Б. Сглаживание пор и шума
-    smooth = cv2.bilateralFilter(cl, 9, noise_clean * 10, noise_clean * 10)
+    # Б. Сглаживание пор и шума (очень сильный Bilateral)
+    # Это превращает кожу в гладкий пластик, оставляя только анатомию
+    smooth = cv2.bilateralFilter(cl, 9, noise_clean * 12, noise_clean * 12)
 
-    # В. Извлечение "хребтов" теней (Ridge Detection)
-    # Используем разницу размытий (DoG) для поиска центральных осей теней
-    g1 = cv2.GaussianBlur(smooth, (3, 3), 0)
-    g2 = cv2.GaussianBlur(smooth, (15, 15), 0)
-    dog = cv2.subtract(g1, g2)
+    # В. Адаптивный поиск "центра" тени (без Canny!)
+    # Этот блок ищет только темные "хребты", создавая одиночные линии
+    block_size = 11
+    # Константа регулирует чувствительность к мягким теням
+    constant = (100 - shadow_boost) / 5
     
-    # Порог проявления линий
-    _, ridges = cv2.threshold(dog, 255 - (anatomy_boost * 2), 255, cv2.THRESH_BINARY)
+    binary = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                    cv2.THRESH_BINARY, block_size, constant)
+    
+    # Инвертируем, чтобы получить линии
+    lines = cv2.bitwise_not(binary)
 
-    # Г. Устранение двойных линий и соединение разрывов
+    # Г. Очистка от "зерна" (MORPH_OPEN)
     kernel = np.ones((2,2), np.uint8)
-    # Соединяем разрывы (Closing)
-    closed = cv2.morphologyEx(ridges, cv2.MORPH_CLOSE, kernel, iterations=1)
-    
-    # Безопасное утончение (не удаляет линии целиком)
-    skeleton = cv2.erode(closed, kernel, iterations=1)
-    # Финальный контур через Canny для идеальной остроты
-    final_stencil = cv2.Canny(skeleton, 50, 150)
+    final_stencil = cv2.morphologyEx(lines, cv2.MORPH_OPEN, kernel)
 
-    # Д. Регулировка толщины
-    if line_sharpness > 1:
-        final_stencil = cv2.dilate(final_stencil, np.ones((line_sharpness, line_sharpness), np.uint8))
+    # Д. Тонкая настройка веса линии
+    if line_weight > 1:
+        final_stencil = cv2.dilate(final_stencil, np.ones((line_weight, line_weight), np.uint8))
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -79,7 +75,7 @@ if uploaded_file:
     preview_img = blended_bg.copy()
     preview_img[final_stencil > 0] = selected_color
 
-    st.image(preview_img, caption="Стенсил по твоей ручной логике", use_column_width=True)
+    st.image(preview_img, caption="Готовый стенсил (логика одиночной линии)", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
@@ -101,5 +97,6 @@ if uploaded_file:
         return buffer.getvalue()
 
     pdf_data = create_pdf(final_stencil, target_width_cm, selected_color)
+    st.sidebar.markdown("---")
     st.sidebar.download_button(label="📥 Скачать PDF", data=pdf_data, file_name="angar_stencil.pdf", mime="application/pdf")
     
