@@ -13,7 +13,6 @@ st.title("AnGar Stencil Pro 🔴")
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # 1. Загрузка и подготовка
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -30,46 +29,44 @@ if uploaded_file:
     st.sidebar.subheader("Визуальный контроль")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 40)
     
-    st.sidebar.subheader("Проработка анатомии")
-    # shadow_boost - вытягивает те самые зеленые линии
-    shadow_boost = st.sidebar.slider("Проявление теней", 1, 100, 50)
-    noise_filter = st.sidebar.slider("Чистота (удаление пор)", 1, 15, 5)
-    line_boldness = st.sidebar.slider("Жирность линий", 1, 3, 1)
+    st.sidebar.subheader("Логика ручного стенсила")
+    # shadow_depth - находит те самые "зеленые зоны" анатомии
+    shadow_depth = st.sidebar.slider("Глубина анатомии (Shadows)", 1, 100, 40)
+    cleanliness = st.sidebar.slider("Чистота (удаление текстуры)", 1, 20, 7)
+    # line_precision - делает линии острыми
+    line_precision = st.sidebar.slider("Острота линий", 1, 5, 1)
 
-    # --- АЛГОРИТМ "ЦЕНТРАЛЬНОЙ ЛИНИИ" ---
+    # --- АЛГОРИТМ "АНАТОМИЧЕСКИЙ СКЕЛЕТ" ---
 
-    # А. Усиление теней через CLAHE
+    # 1. Подготовка: Усиливаем детали в тенях (CLAHE)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     cl = clahe.apply(gray)
 
-    # Б. Фильтрация пор кожи
-    smooth = cv2.bilateralFilter(cl, 9, noise_filter * 10, noise_filter * 10)
+    # 2. Мощное сглаживание текстуры (пор, зерна) при сохранении контуров
+    smooth = cv2.bilateralFilter(cl, 9, cleanliness * 10, cleanliness * 10)
 
-    # В. Поиск "хребтов" теней (Ridge Detection упрощенно)
-    # Используем адаптивный порог с маленьким окном для поиска тонких линий
-    block_size = 7
-    c_val = 101 - shadow_boost
-    ridges = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                    cv2.THRESH_BINARY, block_size, c_val / 10)
-    ridges = cv2.bitwise_not(ridges)
-
-    # Г. Основной контур (Canny) для четких краев
-    edges = cv2.Canny(smooth, 100, 200)
-
-    # Д. Объединение и схлопывание двойных линий
-    combined = cv2.bitwise_or(edges, ridges)
+    # 3. Детектор хребтов (Ridge Detection через Laplacian)
+    # Этот метод ищет центр тени, а не её края (решает проблему дублирования)
+    laplacian = cv2.Laplacian(smooth, cv2.CV_64F, ksize=3)
+    laplacian = np.uint8(np.absolute(laplacian))
     
-    # Финальная очистка и утончение
-    kernel = np.ones((2,2), np.uint8)
-    # Убираем одиночные пиксели (мусор)
-    cleaned = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
-    
-    # Скелетизация (оставляем только центр линии)
-    final_stencil = cv2.erode(cleaned, kernel, iterations=1)
-    final_stencil = cv2.Canny(final_stencil, 50, 150)
+    # Адаптивный порог для выделения линий
+    block_size = 11
+    thresh_val = 255 - (shadow_depth * 2)
+    _, lines = cv2.threshold(laplacian, thresh_val, 255, cv2.THRESH_BINARY)
 
-    if line_boldness > 1:
-        final_stencil = cv2.dilate(final_stencil, np.ones((line_boldness, line_boldness), np.uint8))
+    # 4. Скелетизация (превращаем в 1 пиксель)
+    # Используем морфологическое истончение
+    kernel = np.ones((3,3), np.uint8)
+    skeleton = cv2.erode(lines, kernel, iterations=1)
+    # Дополнительная очистка от мелких точек-шума
+    skeleton = cv2.morphologyEx(skeleton, cv2.MORPH_OPEN, kernel)
+
+    # 5. Итоговый контур
+    if line_precision > 1:
+        final_edges = cv2.dilate(skeleton, np.ones((line_precision, line_precision), np.uint8))
+    else:
+        final_edges = skeleton
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -78,9 +75,9 @@ if uploaded_file:
     blended_bg = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     
     preview_img = blended_bg.copy()
-    preview_img[final_stencil > 0] = selected_color
+    preview_img[final_edges > 0] = selected_color
 
-    st.image(preview_img, caption="Стенсил готов (Центральные линии)", use_column_width=True)
+    st.image(preview_img, caption="Автоматический стенсил по логике ручной отрисовки", use_column_width=True)
 
     # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
@@ -101,6 +98,6 @@ if uploaded_file:
         p.save()
         return buffer.getvalue()
 
-    pdf_data = create_pdf(final_stencil, target_width_cm, selected_color)
+    pdf_data = create_pdf(final_edges, target_width_cm, selected_color)
     st.sidebar.download_button(label="📥 Скачать PDF", data=pdf_data, file_name="angar_stencil.pdf", mime="application/pdf")
     
