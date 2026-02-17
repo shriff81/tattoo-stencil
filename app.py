@@ -35,46 +35,42 @@ if uploaded_file:
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
     
     st.sidebar.subheader("Геометрия линий")
-    shadow_detail = st.sidebar.slider("Проработка теней (детализация)", 0, 10, 2)
-    noise_reduction = st.sidebar.slider("Чистота фона", 1, 10, 2)
-    edge_sensitivity = st.sidebar.slider("Чувствительность", 10, 250, 140)
+    # Увеличиваем этот параметр, чтобы найти потерянные тени
+    shadow_depth = st.sidebar.slider("Глубина поиска теней", 1, 50, 25)
+    edge_force = st.sidebar.slider("Четкость контура", 10, 250, 150)
     line_thickness = st.sidebar.slider("Толщина линии", 1, 3, 1)
 
-    # --- АЛГОРИТМ БЕЗ ДВОЙНЫХ ЛИНИЙ ---
+    # --- НОВЫЙ АЛГОРИТМ: СХЛОПЫВАНИЕ ДВОЙНЫХ ЛИНИЙ + ТЕНИ ---
     
-    # 1. Мягкое сглаживание для удаления микро-контраста
-    smooth = cv2.bilateralFilter(gray, 9, 75, 75)
+    # 1. Выравнивание освещения для проявления деталей
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    cl = clahe.apply(gray)
     
-    # 2. Поиск основных границ (Canny)
-    edges_main = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
+    # 2. Поиск границ с защитой от разрывов
+    blur = cv2.GaussianBlur(cl, (5, 5), 0)
+    edges = cv2.Canny(blur, edge_force // 2, edge_force)
     
-    # 3. Адаптивный слой для теней (с защитой от дублирования)
-    if shadow_detail > 0:
-        # Используем Mean вместо Gaussian для более четких одиночных линий
-        block_size = 3 + (shadow_detail * 2)
-        soft_edges = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_MEAN_C, 
-                                            cv2.THRESH_BINARY, block_size, 5)
-        soft_edges = cv2.bitwise_not(soft_edges)
-        
-        # Удаляем "шум" и тонкие двойные ореолы
-        kernel_clean = np.ones((2,2), np.uint8)
-        soft_edges = cv2.morphologyEx(soft_edges, cv2.MORPH_OPEN, kernel_clean)
-        
-        # Смешиваем, приоритет отдаем основным границам
-        combined = cv2.bitwise_or(edges_main, soft_edges)
-    else:
-        combined = edges_main
+    # 3. Выделение зон теней (обводка элементов)
+    shadow_mask = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                        cv2.THRESH_BINARY, 21, shadow_depth // 5)
+    shadow_lines = cv2.Canny(shadow_mask, 10, 50)
+    
+    # Объединяем слои
+    combined = cv2.bitwise_or(edges, shadow_lines)
+    
+    # 4. ФИНАЛЬНОЕ РЕШЕНИЕ ПРОБЛЕМЫ ДУБЛИРОВАНИЯ (Скелетизация)
+    # Мы превращаем любую область в линию толщиной 1 пиксель
+    kernel = np.ones((3,3), np.uint8)
+    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel) # Соединяем разрывы
+    
+    # Используем Zhang-Suen алгоритм для схлопывания двойных линий в одну
+    skeleton = cv2.ximgproc.thinning(combined)
 
-    # 4. ФИНАЛЬНОЕ УТОНЧЕНИЕ (Убираем эффект дублирования)
-    # Используем морфологический скелет для схлопывания близких линий
-    if line_thickness == 1:
-        # Тонкое сужение для удаления "двойного края"
-        kernel_thin = np.ones((2,2), np.uint8)
-        combined = cv2.erode(combined, kernel_thin, iterations=1)
-        combined = cv2.Canny(combined, 50, 150) # Пересчитываем контур после сужения
-    elif line_thickness > 1:
+    if line_thickness > 1:
         kernel_thick = np.ones((line_thickness, line_thickness), np.uint8)
-        combined = cv2.dilate(combined, kernel_thick, iterations=1)
+        final_edges = cv2.dilate(skeleton, kernel_thick, iterations=1)
+    else:
+        final_edges = skeleton
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -83,11 +79,11 @@ if uploaded_file:
     blended_bg = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     
     preview_img = blended_bg.copy()
-    preview_img[combined > 0] = selected_color
+    preview_img[final_edges > 0] = selected_color
 
-    st.image(preview_img, caption="Чистый стенсил без дублирования", use_column_width=True)
+    st.image(preview_img, caption="Исправленный стенсил: одна линия и глубокие тени", use_column_width=True)
 
-    # PDF Функция
+    # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
         h, w = edge_data.shape
         aspect = h / w
@@ -106,8 +102,6 @@ if uploaded_file:
         p.save()
         return buffer.getvalue()
 
-    pdf_data = create_pdf(combined, target_width_cm, selected_color)
-    
-    st.sidebar.markdown("---")
+    pdf_data = create_pdf(final_edges, target_width_cm, selected_color)
     st.sidebar.download_button(label="📥 Скачать PDF", data=pdf_data, file_name="angar_stencil.pdf", mime="application/pdf")
     
