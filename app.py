@@ -17,64 +17,50 @@ if uploaded_file:
     img_array = np.array(image.convert('RGB'))
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     
-    # Настройки в боковой панели
     st.sidebar.header("Настройки Мастера")
     target_width_cm = st.sidebar.number_input("Ширина печати (см)", 5.0, 30.0, 15.0)
     bg_mode = st.sidebar.radio("Фон стенсила:", ["Белый (для печати)", "Прозрачный"])
     
-    st.sidebar.subheader("Тонкая настройка линий")
-    edge_sensitivity = st.sidebar.slider("Чувствительность к деталям", 10, 250, 150)
-    shadow_depth = st.sidebar.slider("Глубина теней", 1, 15, 5)
+    st.sidebar.subheader("Устранение двойных линий")
+    # Этот ползунок поможет убрать "обводку обводки"
+    line_fusion = st.sidebar.slider("Слияние двойных линий", 1, 5, 2)
+    edge_sensitivity = st.sidebar.slider("Чувствительность", 10, 250, 150)
 
-    # 1. Обработка: Улучшенное выделение границ
-    # Используем Bilateral Filter для сохранения границ при удалении шума
-    smooth = cv2.bilateralFilter(gray, 9, 75, 75)
+    # 1. Подготовка: Убираем мелкий шум, который дает двойные контуры
+    smooth = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # Основные контуры
+    # 2. Поиск границ
     edges = cv2.Canny(smooth, edge_sensitivity // 2, edge_sensitivity)
     
-    # Теневые переходы (изолинии)
-    shadow_map = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                        cv2.THRESH_BINARY, 11, shadow_depth)
-    shadow_edges = cv2.Canny(shadow_map, 10, 50)
-    
-    # Объединяем все линии
-    combined_edges = cv2.bitwise_or(edges, shadow_edges)
+    # 3. МОРФОЛОГИЯ: Схлопываем двойные линии в одну
+    kernel = np.ones((line_fusion, line_fusion), np.uint8)
+    # Сначала расширяем линии, чтобы они слились в одну толстую
+    dilated = cv2.dilate(edges, kernel, iterations=1)
+    # Затем сужаем их обратно до центральной оси (скелетизация упрощенно)
+    final_edges = cv2.erode(dilated, kernel, iterations=1)
 
-    # 2. Создание Красного Стенсила
-    # Создаем пустое изображение с Альфа-каналом (RGBA)
+    # 4. Создание Красного Стенсила
     h, w = gray.shape
-    red_stencil = np.zeros((h, w, 4), dtype=np.uint8)
-    
-    # Заполняем линии ярко-красным (R:255, G:0, B:0)
-    red_stencil[combined_edges > 0] = [255, 0, 0, 255] 
-    
     if bg_mode == "Белый (для печати)":
-        # Создаем белый фон и накладываем на него красные линии
         final_view = np.ones((h, w, 3), dtype=np.uint8) * 255
-        final_view[combined_edges > 0] = [255, 0, 0]
+        final_view[final_edges > 0] = [255, 0, 0]
     else:
-        # Оставляем прозрачным там, где нет линий
-        final_view = red_stencil
+        final_view = np.zeros((h, w, 4), dtype=np.uint8)
+        final_view[final_edges > 0] = [255, 0, 0, 255]
 
-    st.image(final_view, caption="Красный стенсил (Превью)", use_column_width=True)
+    st.image(final_view, caption="Результат без двойных контуров", use_column_width=True)
 
-    # Функция PDF
-    def create_pdf(img_np, width_cm, is_transparent):
-        h, w = img_np.shape[:2]
+    # PDF Функция (без изменений в логике, только обновленный final_edges)
+    def create_pdf(img_np, width_cm, is_transparent, edge_data):
+        h, w = edge_data.shape
         aspect = h / w
         height_cm = width_cm * aspect
-        
         buffer = io.BytesIO()
         p = canvas.Canvas(buffer, pagesize=A4)
         
-        # Если был прозрачный, для PDF делаем на белом (принтеры не печатают прозрачность)
-        if is_transparent:
-            pdf_img_np = np.ones((h, w, 3), dtype=np.uint8) * 255
-            pdf_img_np[combined_edges > 0] = [255, 0, 0]
-        else:
-            pdf_img_np = img_np
-
+        pdf_img_np = np.ones((h, w, 3), dtype=np.uint8) * 255
+        pdf_img_np[edge_data > 0] = [255, 0, 0]
+        
         temp_img = Image.fromarray(pdf_img_np)
         img_byte_arr = io.BytesIO()
         temp_img.save(img_byte_arr, format='PNG')
@@ -86,7 +72,7 @@ if uploaded_file:
         p.save()
         return buffer.getvalue()
 
-    pdf_data = create_pdf(final_view, target_width_cm, bg_mode == "Прозрачный")
+    pdf_data = create_pdf(final_view, target_width_cm, bg_mode == "Прозрачный", final_edges)
     
     st.download_button(
         label="📥 Скачать КРАСНЫЙ PDF (1:1)",
