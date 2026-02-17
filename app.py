@@ -3,48 +3,79 @@ import cv2
 import numpy as np
 from PIL import Image
 import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import cm
 
 st.set_page_config(page_title="AnGar Stencil Pro", layout="wide")
 st.title("AnGar Stencil Pro 🎨")
 
-uploaded_file = st.file_uploader("Загрузите фото", type=['jpg', 'png', 'jpeg'])
+uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
+    # Загрузка
     image = Image.open(uploaded_file)
-    img = np.array(image.convert('RGB'))
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    img_array = np.array(image.convert('RGB'))
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     
     # Настройки
-    st.sidebar.header("Настройки мастера")
-    target_width_cm = st.sidebar.number_input("Ширина тату (см)", 5.0, 50.0, 15.0)
-    main_edge = st.sidebar.slider("Четкость основных линий", 50, 200, 120)
-    shadow_detail = st.sidebar.slider("Детализация теней", 1, 5, 3)
+    st.sidebar.header("Параметры стенсила")
+    target_width_cm = st.sidebar.number_input("Ширина печати (см)", 5.0, 30.0, 15.0)
+    detail_level = st.sidebar.slider("Детализация теней (линии переходов)", 1, 10, 4)
+    edge_thickness = st.sidebar.slider("Жирность контура", 1, 5, 1)
 
-    # 1. Сплошные основные контуры (Canny)
-    edges = cv2.Canny(gray, main_edge//2, main_edge)
+    # Алгоритм: Чистые линии без серого
+    # 1. Основной контур
+    main_edges = cv2.Canny(gray, 100, 200)
     
-    # 2. Создаем карту градиентов (Пунктир/Тонкие линии)
-    # Используем адаптивный порог для выделения зон теней
-    shadows = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                    cv2.THRESH_BINARY, 11, shadow_detail * 2)
+    # 2. Линии переходов теней (изолинии)
+    # Используем аппроксимацию уровней для создания четких границ между тонами
+    blur = cv2.bilateralFilter(gray, 9, 75, 75)
+    levels = np.floor(blur / (255 / detail_level)) * (255 / detail_level)
+    shadow_edges = cv2.Canny(levels.astype(np.uint8), 10, 50)
     
-    # Инвертируем и чистим шум
-    shadows_inv = cv2.bitwise_not(shadows)
-    kernel = np.ones((2,2), np.uint8)
-    shadows_inv = cv2.morphologyEx(shadows_inv, cv2.MORPH_OPEN, kernel)
+    # Объединяем всё в один чисто черный слой на белом фоне
+    final_stencil = np.ones_like(gray) * 255
+    final_stencil[shadow_edges > 0] = 0
+    final_stencil[main_edges > 0] = 0
+    
+    # Утолщение линий если нужно
+    if edge_thickness > 1:
+        kernel = np.ones((edge_thickness, edge_thickness), np.uint8)
+        final_stencil = cv2.erode(final_stencil, kernel)
 
-    # Смешиваем результат
-    canvas = np.ones_like(gray) * 255
-    # Накладываем тени серым цветом (имитация пунктира/тонкой линии)
-    canvas[shadows_inv > 0] = 180
-    # Накладываем основные контуры черным
-    canvas[edges > 0] = 0
+    st.image(final_stencil, caption="Результат: Только линии", use_column_width=True)
 
-    st.image(canvas, caption="Готовый трансфер", use_column_width=True)
+    # Генерация PDF с точным размером
+    def create_pdf(img_data, width_cm):
+        # Сохраняем пропорции
+        h, w = img_data.shape
+        aspect = h / w
+        height_cm = width_cm * aspect
+        
+        buffer = io.BytesIO()
+        p = canvas.Canvas(buffer, pagesize=A4)
+        
+        # Превращаем массив в картинку для PDF
+        temp_img = Image.fromarray(img_data)
+        img_byte_arr = io.BytesIO()
+        temp_img.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        
+        from reportlab.lib.utils import ImageReader
+        reportlab_img = ImageReader(img_byte_arr)
+        
+        # Рисуем в центре листа А4
+        p.drawImage(reportlab_img, 1*cm, (29.7 - height_cm - 1)*cm, width=width_cm*cm, height=height_cm*cm)
+        p.showPage()
+        p.save()
+        return buffer.getvalue()
+
+    pdf_data = create_pdf(final_stencil, target_width_cm)
     
-    # Подготовка файла
-    res_img = Image.fromarray(canvas)
-    buf = io.BytesIO()
-    res_img.save(buf, format="PNG")
-    
-    st.download_button("Скачать stencil для печати", buf.getvalue(), "stencil.png", "image/png")
+    st.download_button(
+        label="Скачать PDF для печати (Точный размер)",
+        data=pdf_data,
+        file_name="angar_stencil.pdf",
+        mime="application/pdf"
+    )
