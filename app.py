@@ -13,23 +13,22 @@ st.title("AnGar Stencil Pro 🎨")
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # 1. Загрузка и подготовка
+    # 1. Загрузка
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     
     st.sidebar.header("Параметры стенсила")
     target_width_cm = st.sidebar.number_input("Ширина печати (см)", 5.0, 30.0, 15.0)
-    
-    # Цвет стенсила
     color_name = st.sidebar.selectbox("Цвет линий:", ["Черный", "Ярко-красный", "Ярко-синий", "Ярко-зеленый"])
     colors_dict = {"Черный": [0,0,0], "Ярко-красный": [255,0,0], "Ярко-синий": [0,0,255], "Ярко-зеленый": [0,255,0]}
     sel_color = colors_dict[color_name]
 
-    st.sidebar.subheader("Детализация")
-    # CLAHE вытянет тени в зеленых зонах
-    contrast_boost = st.sidebar.slider("Усиление деталей (Contrast)", 1.0, 10.0, 3.0)
-    detail_level = st.sidebar.slider("Слои теней", 1, 15, 6)
+    st.sidebar.subheader("Структура и Детали")
+    # Ваши базовые настройки
+    detail_level = st.sidebar.slider("Основные уровни теней", 1, 15, 6)
+    # НОВЫЙ ПОЛЗУНОК для "зеленых зон"
+    soft_shadows = st.sidebar.slider("Добавить мягкие переходы (мышцы/крылья)", 0, 50, 0)
     
     st.sidebar.subheader("Очистка и Толщина")
     clean_level = st.sidebar.slider("Чистота (удаление точек)", 0, 100, 15)
@@ -40,22 +39,33 @@ if uploaded_file:
 
     # --- АЛГОРИТМ ОБРАБОТКИ ---
     
-    # А. Усиление локального контраста (CLAHE) - решение для зеленых зон
-    clahe = cv2.createCLAHE(clipLimit=contrast_boost, tileGridSize=(8,8))
-    cl = clahe.apply(gray)
+    # 1. Основной контур (Резкие края)
+    main_edges = cv2.Canny(gray, 100, 200)
+    
+    # 2. Изолинии уровней (Ваша базовая логика)
+    # Используем сильное сглаживание, чтобы уровни были чистыми
+    blur_base = cv2.bilateralFilter(gray, 9, 75, 75)
+    levels = np.floor(blur_base / (255 / detail_level)) * (255 / detail_level)
+    level_edges = cv2.Canny(levels.astype(np.uint8), 10, 50)
+    
+    # 3. НОВЫЙ СЛОЙ: Мягкие переходы (DoG)
+    # Этот слой ищет то, что пропустили уровни
+    if soft_shadows > 0:
+        # Разница между сильным и слабым размытием выделяет средние детали
+        g1 = cv2.GaussianBlur(gray, (3, 3), 0)
+        g2 = cv2.GaussianBlur(gray, (21, 21), 0)
+        dog = cv2.subtract(g2, g1)
+        # Чем выше soft_shadows, тем больше линий проявится
+        threshold_val = 55 - soft_shadows
+        _, soft_edges = cv2.threshold(dog, threshold_val, 255, cv2.THRESH_BINARY)
+    else:
+        soft_edges = np.zeros_like(gray)
 
-    # Б. Твоя логика изолиний
-    blur = cv2.bilateralFilter(cl, 9, 75, 75)
-    levels = np.floor(blur / (255 / detail_level)) * (255 / detail_level)
-    shadow_edges = cv2.Canny(levels.astype(np.uint8), 10, 50)
+    # 4. Объединение всех слоев
+    combined = cv2.bitwise_or(main_edges, level_edges)
+    combined = cv2.bitwise_or(combined, soft_edges)
     
-    # В. Основной контур
-    main_edges = cv2.Canny(cl, 100, 200)
-    
-    # Г. Объединение
-    combined = cv2.bitwise_or(main_edges, shadow_edges)
-    
-    # Д. Очистка от мусора (точек)
+    # 5. Очистка от мусора (точек)
     if clean_level > 0:
         nb_components, output, stats, _ = cv2.connectedComponentsWithStats(combined, connectivity=8)
         combined = np.zeros(combined.shape, dtype=np.uint8)
@@ -63,7 +73,7 @@ if uploaded_file:
             if stats[i, cv2.CC_STAT_AREA] >= clean_level:
                 combined[output == i] = 255
 
-    # Е. Толщина
+    # 6. Толщина
     if edge_thickness > 1:
         kernel = np.ones((edge_thickness, edge_thickness), np.uint8)
         combined = cv2.dilate(combined, kernel)
@@ -75,7 +85,7 @@ if uploaded_file:
     blended = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     blended[combined > 0] = sel_color
 
-    st.image(blended, caption="Обновленный стенсил", use_column_width=True)
+    st.image(blended, caption="Базовый алгоритм + Мягкие переходы", use_column_width=True)
 
     # --- ГЕНЕРАЦИЯ PDF ---
     def create_pdf(mask, width, color_rgb):
