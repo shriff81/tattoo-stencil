@@ -29,50 +29,44 @@ if uploaded_file:
     st.sidebar.subheader("Визуальный контроль")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 40)
     
-    st.sidebar.subheader("Логика отрисовки")
-    # shadow_boost - отвечает за те самые "зеленые зоны"
-    shadow_boost = st.sidebar.slider("Проработка анатомии (Shadows)", 1, 100, 50)
-    # connectivity - склеивает точки в линии
-    connectivity = st.sidebar.slider("Связность линий (убирает точки)", 1, 5, 2)
-    # clean_level - удаляет мелкий мусор
-    clean_level = st.sidebar.slider("Чистота (удаление мусора)", 1, 50, 15)
+    st.sidebar.subheader("Фильтрация (Назад к деталям)")
+    # Позволяет вытащить те самые "зеленые зоны"
+    detail_boost = st.sidebar.slider("Детализация теней", 1, 100, 50)
+    # Помогает слить двойные линии в одну
+    line_fusion = st.sidebar.slider("Слияние линий (убирает двойные)", 1, 5, 1)
+    # Убирает мелкую пыль
+    noise_clean = st.sidebar.slider("Чистота (удаление шума)", 1, 50, 10)
 
-    # --- АЛГОРИТМ "MEDIAL AXIS" (ЦЕНТРАЛЬНАЯ ЛИНИЯ) ---
+    # --- АЛГОРИТМ "ПЛОТНЫЙ КОНТУР" ---
 
-    # 1. Подготовка и усиление деталей
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(gray)
-    smooth = cv2.bilateralFilter(enhanced, 9, 75, 75)
+    # 1. Усиление контраста
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    cl = clahe.apply(gray)
+    
+    # 2. Мягкое сглаживание
+    smooth = cv2.bilateralFilter(cl, 9, 75, 75)
 
-    # 2. Выделение зон теней (анатомии)
-    block_size = 15
-    # Константа регулирует "впитывание" теней
-    const = (100 - shadow_boost) / 5
+    # 3. Адаптивный порог (Дает много стенсила)
+    block_size = 11
+    # Чем меньше shadow_boost, тем больше деталей
+    constant = (105 - detail_boost) / 5
     binary = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                    cv2.THRESH_BINARY, block_size, const)
-    binary = cv2.bitwise_not(binary)
+                                    cv2.THRESH_BINARY, block_size, constant)
+    lines = cv2.bitwise_not(binary)
 
-    # 3. СКЛЕИВАНИЕ ПУНКТИРА (Превращаем точки в линии)
-    # Сначала расширяем, чтобы точки соприкоснулись
-    kernel_conn = np.ones((connectivity, connectivity), np.uint8)
-    dilated = cv2.dilate(binary, kernel_conn, iterations=1)
-    
-    # 4. УДАЛЕНИЕ МУСОРА
-    nb_components, output, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
-    solid_lines = np.zeros(dilated.shape, dtype=np.uint8)
+    # 4. БЕЗОПАСНАЯ ОЧИСТКА
+    # Сначала сливаем близкие линии (решает проблему двойного контура)
+    if line_fusion > 1:
+        kernel_fuse = np.ones((line_fusion, line_fusion), np.uint8)
+        lines = cv2.dilate(lines, kernel_fuse, iterations=1)
+        lines = cv2.erode(lines, kernel_fuse, iterations=1)
+
+    # 5. УДАЛЕНИЕ МУСОРА (ТОЧЕК)
+    nb_components, output, stats, _ = cv2.connectedComponentsWithStats(lines, connectivity=8)
+    final_stencil = np.zeros(lines.shape, dtype=np.uint8)
     for i in range(1, nb_components):
-        if stats[i, cv2.CC_STAT_AREA] >= clean_level:
-            solid_lines[output == i] = 255
-
-    # 5. ИСТОНЧЕНИЕ (Skeletonization через Distance Transform)
-    # Находим центры получившихся форм
-    dist = cv2.distanceTransform(solid_lines, cv2.DIST_L2, 3)
-    # Оставляем только "гребень" дистанции (самую середину линии)
-    _, skeleton = cv2.threshold(dist, 0.4 * dist.max() if dist.max() > 0 else 0, 255, cv2.THRESH_BINARY)
-    final_stencil = skeleton.astype(np.uint8)
-    
-    # Делаем финальный контур острым через Canny
-    final_stencil = cv2.Canny(final_stencil, 50, 150)
+        if stats[i, cv2.CC_STAT_AREA] >= noise_clean:
+            final_stencil[output == i] = 255
 
     # --- ОТОБРАЖЕНИЕ ---
     h, w = gray.shape
@@ -83,9 +77,9 @@ if uploaded_file:
     preview_img = blended_bg.copy()
     preview_img[final_stencil > 0] = selected_color
 
-    st.image(preview_img, caption="Чистые анатомические линии (без точек и дублей)", use_column_width=True)
+    st.image(preview_img, caption="Стенсил: Возврат к деталям", use_column_width=True)
 
-    # PDF Функция
+    # Функция PDF
     def create_pdf(edge_data, width_cm, color_rgb):
         h, w = edge_data.shape
         aspect = h / w
