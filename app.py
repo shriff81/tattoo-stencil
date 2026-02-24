@@ -7,12 +7,38 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ УТОНЧЕНИЯ ЛИНИЙ ---
+def skeletonize(img):
+    """
+    Превращает толстые линии в линии толщиной 1 пиксель.
+    Работает через итеративное морфологическое утоньшение.
+    """
+    size = np.size(img)
+    skel = np.zeros(img.shape, np.uint8)
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3))
+    done = False
+    
+    temp_img = img.copy()
+    while(not done):
+        eroded = cv2.erode(temp_img, element)
+        temp = cv2.dilate(eroded, element)
+        temp = cv2.subtract(temp_img, temp)
+        skel = cv2.bitwise_or(skel, temp)
+        temp_img = eroded.copy()
+        
+        zeros = size - cv2.countNonZero(temp_img)
+        if zeros == size:
+            done = True
+    return skel
+# --------------------------------------------------
+
 st.set_page_config(page_title="AnGar Stencil Pro", layout="wide")
 st.title("AnGar Stencil Pro 🎨")
 
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
+    # 1. Загрузка
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -24,32 +50,29 @@ if uploaded_file:
     colors_dict = {"Черный": [0,0,0], "Ярко-красный": [255,0,0], "Ярко-синий": [0,0,255], "Ярко-зеленый": [0,255,0]}
     sel_color = colors_dict[color_name]
 
-    st.sidebar.subheader("1. Приоритет ЧЕРНОГО")
-    # Твоя идея: обводить всё, что максимально близко к черному
-    black_threshold = st.sidebar.slider("Порог глубоких теней (Глаза/Губы)", 5, 80, 30)
-
-    st.sidebar.subheader("2. Топография (Тени)")
+    st.sidebar.subheader("1. Слои Стенсила")
+    black_threshold = st.sidebar.slider("Порог глубоких теней (Глаза/Губы)", 5, 100, 30)
     num_levels = st.sidebar.slider("Количество уровней градации", 2, 12, 6)
     anatomy_boost = st.sidebar.slider("Усиление мышц и перьев", 0, 100, 30)
     
-    st.sidebar.subheader("3. Фильтр мусора")
-    min_size_mm = st.sidebar.slider("Игнорировать детали меньше (мм)", 0.1, 3.0, 0.8, step=0.1)
+    st.sidebar.subheader("2. Очистка и Толщина")
+    min_size_mm = st.sidebar.slider("Игнорировать мусор меньше (мм)", 0.1, 3.0, 0.8, step=0.1)
+    # НОВЫЙ ВАЖНЫЙ ПОЛЗУНОК
+    line_thickness = st.sidebar.slider("Толщина линии (1 = Скелет)", 1, 3, 1)
     
     st.sidebar.subheader("Просмотр")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
 
-    # --- АЛГОРИТМ "BLACK FIRST" ---
+    # --- АЛГОРИТМ ОБРАБОТКИ ---
     
     # Подготовка
     smooth = cv2.bilateralFilter(gray, 9, 75, 75)
 
     # === СЛОЙ 1: ГЛУБОКИЙ ЧЕРНЫЙ (Глаза и губы) ===
-    # Находим всё, что темнее заданного порога
     _, black_zones = cv2.threshold(smooth, black_threshold, 255, cv2.THRESH_BINARY_INV)
-    # Обводим границы этих черных зон
     black_edges = cv2.morphologyEx(black_zones, cv2.MORPH_GRADIENT, np.ones((3,3), np.uint8))
 
-    # === СЛОЙ 2: ТОПОГРАФИЯ (Твоя база) ===
+    # === СЛОЙ 2: ТОПОГРАФИЯ (База) ===
     factor = 255 // (num_levels - 1)
     quantized = (smooth // factor) * factor
     topo_edges = cv2.morphologyEx(quantized, cv2.MORPH_GRADIENT, np.ones((3,3), np.uint8))
@@ -62,21 +85,31 @@ if uploaded_file:
     threshold_val = 50 - (anatomy_boost // 2)
     _, anatomy_edges = cv2.threshold(dog, max(5, threshold_val), 255, cv2.THRESH_BINARY)
 
-    # === ОБЪЕДИНЕНИЕ С ПРИОРИТЕТОМ ===
+    # === ОБЪЕДИНЕНИЕ ===
     combined = cv2.bitwise_or(topo_edges, anatomy_edges)
     combined = cv2.bitwise_or(combined, black_edges)
 
-    # === ОЧИСТКА МУСОРА ===
+    # === ОЧИСТКА МУСОРА ПО РАЗМЕРУ ===
     h_px, w_px = gray.shape
     px_per_mm = w_px / (target_width_cm * 10)
     min_area_px = (min_size_mm * px_per_mm) ** 2
 
     nb_components, output, stats, _ = cv2.connectedComponentsWithStats(combined, connectivity=8)
-    final_stencil = np.zeros(combined.shape, dtype=np.uint8)
+    cleaned_mask = np.zeros(combined.shape, dtype=np.uint8)
     
     for i in range(1, nb_components):
         if stats[i, cv2.CC_STAT_AREA] >= min_area_px:
-            final_stencil[output == i] = 255
+            cleaned_mask[output == i] = 255
+
+    # === ФИНАЛЬНАЯ ТОЛЩИНА (СКЕЛЕТИЗАЦИЯ) ===
+    if line_thickness == 1:
+        # Применяем скелетизацию для получения линии в 1 пиксель
+        final_stencil = skeletonize(cleaned_mask)
+    else:
+        # Если нужна линия потолще, немного расширяем скелет
+        skel = skeletonize(cleaned_mask)
+        kernel_thick = np.ones((line_thickness, line_thickness), np.uint8)
+        final_stencil = cv2.dilate(skel, kernel_thick, iterations=1)
 
     # --- ПРЕДПРОСМОТР ---
     alpha = bg_opacity / 100.0
@@ -84,7 +117,7 @@ if uploaded_file:
     blended = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     blended[final_stencil > 0] = sel_color
 
-    st.image(blended, caption="Стенсил: Приоритет черного включен", use_column_width=True)
+    st.image(blended, caption=f"Стенсил: Толщина {line_thickness}", use_column_width=True)
 
     # --- PDF ---
     def create_pdf(mask, width, color_rgb):
