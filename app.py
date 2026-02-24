@@ -13,7 +13,6 @@ st.title("AnGar Stencil Pro 🎨")
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # 1. Загрузка
     image = Image.open(uploaded_file).convert('RGB')
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -25,12 +24,12 @@ if uploaded_file:
     colors_dict = {"Черный": [0,0,0], "Ярко-красный": [255,0,0], "Ярко-синий": [0,0,255], "Ярко-зеленый": [0,255,0]}
     sel_color = colors_dict[color_name]
 
-    st.sidebar.subheader("1. Топография (Тени)")
+    st.sidebar.subheader("1. Приоритет ЧЕРНОГО")
+    # Твоя идея: обводить всё, что максимально близко к черному
+    black_threshold = st.sidebar.slider("Порог глубоких теней (Глаза/Губы)", 5, 80, 30)
+
+    st.sidebar.subheader("2. Топография (Тени)")
     num_levels = st.sidebar.slider("Количество уровней градации", 2, 12, 6)
-    
-    st.sidebar.subheader("2. Детализация лица")
-    # Этот ползунок решит проблему глаз и губ
-    feature_sharpness = st.sidebar.slider("Четкость глаз и губ", 0, 100, 40)
     anatomy_boost = st.sidebar.slider("Усиление мышц и перьев", 0, 100, 30)
     
     st.sidebar.subheader("3. Фильтр мусора")
@@ -39,43 +38,35 @@ if uploaded_file:
     st.sidebar.subheader("Просмотр")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
 
-    # --- АЛГОРИТМ ОБРАБОТКИ ---
+    # --- АЛГОРИТМ "BLACK FIRST" ---
     
     # Подготовка
     smooth = cv2.bilateralFilter(gray, 9, 75, 75)
 
-    # === СЛОЙ 1: ТОПОГРАФИЯ ===
+    # === СЛОЙ 1: ГЛУБОКИЙ ЧЕРНЫЙ (Глаза и губы) ===
+    # Находим всё, что темнее заданного порога
+    _, black_zones = cv2.threshold(smooth, black_threshold, 255, cv2.THRESH_BINARY_INV)
+    # Обводим границы этих черных зон
+    black_edges = cv2.morphologyEx(black_zones, cv2.MORPH_GRADIENT, np.ones((3,3), np.uint8))
+
+    # === СЛОЙ 2: ТОПОГРАФИЯ (Твоя база) ===
     factor = 255 // (num_levels - 1)
     quantized = (smooth // factor) * factor
-    kernel_grad = np.ones((3,3), np.uint8)
-    topo_edges = cv2.morphologyEx(quantized, cv2.MORPH_GRADIENT, kernel_grad)
+    topo_edges = cv2.morphologyEx(quantized, cv2.MORPH_GRADIENT, np.ones((3,3), np.uint8))
     _, topo_edges = cv2.threshold(topo_edges, 1, 255, cv2.THRESH_BINARY)
 
-    # === СЛОЙ 2: ГЛАЗА И ГУБЫ (Sharp Features) ===
-    feature_edges = np.zeros_like(gray)
-    if feature_sharpness > 0:
-        # Усиливаем резкость специально для поиска микро-линий
-        sharp_kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-        sharpened = cv2.filter2D(gray, -1, sharp_kernel)
-        # Ищем резкие границы в темных зонах
-        feature_edges = cv2.Canny(sharpened, 200 - feature_sharpness, 255 - feature_sharpness)
-        # Убираем шум, оставляя только уверенные линии
-        feature_edges = cv2.morphologyEx(feature_edges, cv2.MORPH_OPEN, np.ones((2,2), np.uint8))
+    # === СЛОЙ 3: АНАТОМИЯ (Мягкие переходы) ===
+    g1 = cv2.GaussianBlur(gray, (3, 3), 0)
+    g2 = cv2.GaussianBlur(gray, (15, 15), 0)
+    dog = cv2.subtract(g2, g1)
+    threshold_val = 50 - (anatomy_boost // 2)
+    _, anatomy_edges = cv2.threshold(dog, max(5, threshold_val), 255, cv2.THRESH_BINARY)
 
-    # === СЛОЙ 3: АНАТОМИЯ (Мышцы/Перья) ===
-    anatomy_edges = np.zeros_like(gray)
-    if anatomy_boost > 0:
-        g1 = cv2.GaussianBlur(gray, (3, 3), 0)
-        g2 = cv2.GaussianBlur(gray, (15, 15), 0)
-        dog = cv2.subtract(g2, g1)
-        threshold_val = 50 - (anatomy_boost // 2)
-        _, anatomy_edges = cv2.threshold(dog, max(5, threshold_val), 255, cv2.THRESH_BINARY)
-
-    # === ОБЪЕДИНЕНИЕ ===
+    # === ОБЪЕДИНЕНИЕ С ПРИОРИТЕТОМ ===
     combined = cv2.bitwise_or(topo_edges, anatomy_edges)
-    combined = cv2.bitwise_or(combined, feature_edges)
+    combined = cv2.bitwise_or(combined, black_edges)
 
-    # === ОЧИСТКА ПО РАЗМЕРУ ===
+    # === ОЧИСТКА МУСОРА ===
     h_px, w_px = gray.shape
     px_per_mm = w_px / (target_width_cm * 10)
     min_area_px = (min_size_mm * px_per_mm) ** 2
@@ -93,7 +84,7 @@ if uploaded_file:
     blended = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     blended[final_stencil > 0] = sel_color
 
-    st.image(blended, caption="Стенсил: Глаза и губы теперь проработаны", use_column_width=True)
+    st.image(blended, caption="Стенсил: Приоритет черного включен", use_column_width=True)
 
     # --- PDF ---
     def create_pdf(mask, width, color_rgb):
