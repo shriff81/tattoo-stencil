@@ -7,8 +7,26 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 
-st.set_page_config(page_title="AnGar Stencil Pro", layout="wide")
-st.title("AnGar Stencil Pro 🎨")
+# --- ФУНКЦИЯ СКЕЛЕТИЗАЦИИ (Для одиночных линий в глубоких тенях) ---
+def skeletonize(img):
+    size = np.size(img)
+    skel = np.zeros(img.shape, np.uint8)
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3))
+    done = False
+    temp_img = img.copy()
+    while(not done):
+        eroded = cv2.erode(temp_img, element)
+        temp = cv2.dilate(eroded, element)
+        temp = cv2.subtract(temp_img, temp)
+        skel = cv2.bitwise_or(skel, temp)
+        temp_img = eroded.copy()
+        zeros = size - cv2.countNonZero(temp_img)
+        if zeros == size: done = True
+    return skel
+# ------------------------------------------------------------------
+
+st.set_page_config(page_title="AnGar Stencil Pro (Final)", layout="wide")
+st.title("AnGar Stencil Pro 🎨 (Final Hybrid Edition)")
 
 uploaded_file = st.file_uploader("Загрузите референс", type=['jpg', 'png', 'jpeg'])
 
@@ -17,49 +35,55 @@ if uploaded_file:
     img_array = np.array(image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     
-    st.sidebar.header("Настройки Мастера")
-    target_width_cm = st.sidebar.number_input("Ширина печати (см)", 5.0, 30.0, 15.0)
-    
-    color_name = st.sidebar.selectbox("Цвет линий:", ["Черный", "Ярко-красный", "Ярко-синий", "Ярко-зеленый"])
+    st.sidebar.header("Настройки Печати")
+    target_width_cm = st.sidebar.number_input("Ширина (см)", 5.0, 40.0, 15.0)
+    color_name = st.sidebar.selectbox("Цвет:", ["Черный", "Ярко-красный", "Ярко-синий", "Ярко-зеленый"])
     colors_dict = {"Черный": [0,0,0], "Ярко-красный": [255,0,0], "Ярко-синий": [0,0,255], "Ярко-зеленый": [0,255,0]}
     sel_color = colors_dict[color_name]
 
-    st.sidebar.subheader("1. Топография (Основа)")
-    num_levels = st.sidebar.slider("Количество уровней градации", 2, 15, 8)
+    st.sidebar.header("Настройка Стенсила")
     
-    st.sidebar.subheader("2. Детализация (Тени/Лицо)")
-    # Этот ползунок проявляет детали в глубоких тенях (глаза, губы, мышцы)
-    shadow_boost = st.sidebar.slider("Проявление глубоких теней", 0, 255, 50)
+    st.sidebar.subheader("1. Топография (Структура)")
+    # Определяет количество зон градации
+    num_levels = st.sidebar.slider("Количество уровней градации", 3, 12, 7)
     
-    st.sidebar.subheader("3. Фильтр и Толщина")
-    min_size_mm = st.sidebar.slider("Игнорировать детали меньше (мм)", 0.1, 3.0, 1.0, step=0.1)
-    line_thickness = st.sidebar.slider("Жирность линии", 1, 4, 1)
+    st.sidebar.subheader("2. Глубокие детали (Глаза/Мышцы)")
+    # Чем меньше значение, тем больше глубоких теней будет обведено
+    shadow_threshold = st.sidebar.slider("Порог глубоких теней (меньше = больше деталей)", 10, 100, 40)
     
+    st.sidebar.subheader("3. Финальная обработка")
+    # Физический размер мусора в миллиметрах
+    min_size_mm = st.sidebar.slider("Убрать мусор меньше (мм)", 0.1, 3.0, 1.0, step=0.1)
+    # Базовая линия теперь всегда 1px. Это только для утолщения.
+    add_thickness = st.sidebar.slider("Дополнительная жирность", 0, 3, 0)
+
     st.sidebar.subheader("Просмотр")
-    bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
+    bg_opacity = st.sidebar.slider("Прозрачность фона (%)", 0, 100, 30)
 
-    # --- АЛГОРИТМ ОБРАБОТКИ ---
+    # --- ГИБРИДНЫЙ АЛГОРИТМ ---
     
-    # Подготовка: качественное сглаживание перед делением на зоны
-    smooth = cv2.bilateralFilter(gray, 9, 75, 75)
+    # 0. Качественное сглаживание (убирает текстуру кожи, оставляет форму)
+    smooth = cv2.bilateralFilter(gray, 11, 85, 85)
 
-    # === СЛОЙ 1: ТОПОГРАФИЯ (Тонкие границы зон) ===
-    # Делим изображение на четкие зоны яркости
+    # === СЛОЙ A: ТОПОГРАФИЧЕСКИЕ ТОНКИЕ ЛИНИИ ===
+    # Делим на уровни (постеризация)
     factor = 255 // (num_levels - 1)
     quantized = (smooth // factor) * factor
-    # Применяем Canny к постеризованному изображению - это дает ТОНКИЕ границы
+    # Применяем Canny к зонам - дает идеальную линию в 1 пиксель на стыке
     topo_edges = cv2.Canny(quantized, 50, 150)
 
-    # === СЛОЙ 2: ГЛУБОКИЕ ТЕНИ (Для глаз, губ и пропусков) ===
-    # Выделяем самые темные участки
-    _, dark_zones = cv2.threshold(smooth, shadow_boost, 255, cv2.THRESH_BINARY_INV)
-    # Находим их тонкие границы
-    shadow_edges = cv2.Canny(dark_zones, 50, 150)
+    # === СЛОЙ B: СКЕЛЕТ ГЛУБОКИХ ТЕНЕЙ ===
+    # Выделяем сплошные черные зоны (глаза, ноздри, глубокие складки)
+    _, dark_blobs = cv2.threshold(smooth, shadow_threshold, 255, cv2.THRESH_BINARY_INV)
+    # Немного сглаживаем пятна перед скелетизацией
+    dark_blobs = cv2.morphologyEx(dark_blobs, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
+    # Находим их центральную ось (скелет) - дает одиночную линию
+    shadow_skeleton = skeletonize(dark_blobs)
 
     # === ОБЪЕДИНЕНИЕ ===
-    combined = cv2.bitwise_or(topo_edges, shadow_edges)
+    combined = cv2.bitwise_or(topo_edges, shadow_skeleton)
 
-    # === ОЧИСТКА МУСОРА ПО РАЗМЕРУ ===
+    # === ОЧИСТКА ПО РАЗМЕРУ (мм) ===
     h_px, w_px = gray.shape
     px_per_mm = w_px / (target_width_cm * 10)
     min_area_px = (min_size_mm * px_per_mm) ** 2
@@ -72,8 +96,9 @@ if uploaded_file:
             cleaned_mask[output == i] = 255
 
     # === ФИНАЛЬНАЯ ТОЛЩИНА ===
-    if line_thickness > 1:
-        kernel = np.ones((line_thickness, line_thickness), np.uint8)
+    # Базовая линия уже 1px. Если нужно жирнее - расширяем.
+    if add_thickness > 0:
+        kernel = np.ones((1 + add_thickness, 1 + add_thickness), np.uint8)
         final_stencil = cv2.dilate(cleaned_mask, kernel)
     else:
         final_stencil = cleaned_mask
@@ -84,7 +109,7 @@ if uploaded_file:
     blended = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     blended[final_stencil > 0] = sel_color
 
-    st.image(blended, caption=f"Стенсил: Топография + Тени", use_column_width=True)
+    st.image(blended, caption="Идеальный гибридный стенсил", use_column_width=True)
 
     # --- PDF ---
     def create_pdf(mask, width, color_rgb):
