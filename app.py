@@ -25,45 +25,54 @@ if uploaded_file:
     colors_dict = {"Черный": [0,0,0], "Ярко-красный": [255,0,0], "Ярко-синий": [0,0,255], "Ярко-зеленый": [0,255,0]}
     sel_color = colors_dict[color_name]
 
-    st.sidebar.subheader("Топография теней")
-    # Количество оттенков (градация)
-    num_levels = st.sidebar.slider("Количество уровней (градация)", 2, 10, 6)
+    st.sidebar.subheader("1. Базовая структура (Топография)")
+    num_levels = st.sidebar.slider("Количество уровней градации", 2, 12, 6)
     
-    st.sidebar.subheader("Фильтр мусора")
-    # Минимальный размер детали в мм
-    min_size_mm = st.sidebar.slider("Игнорировать детали меньше (мм)", 0.5, 5.0, 1.5, step=0.5)
+    st.sidebar.subheader("2. Дополнительные детали")
+    # Этот ползунок вытаскивает линии в "зеленых зонах"
+    anatomy_boost = st.sidebar.slider("Усиление анатомии (мышцы/перья)", 0, 100, 30)
+    
+    st.sidebar.subheader("3. Финальная очистка")
+    min_size_mm = st.sidebar.slider("Игнорировать мусор меньше (мм)", 0.1, 3.0, 1.0, step=0.1)
     
     st.sidebar.subheader("Просмотр")
     bg_opacity = st.sidebar.slider("Прозрачность оригинала (%)", 0, 100, 30)
 
-    # --- АЛГОРИТМ "ГРАДАЦИЯ ЦВЕТА" ---
+    # --- АЛГОРИТМ ОБРАБОТКИ ---
     
-    # 1. Сглаживание (чтобы границы уровней были плавными, а не ступенчатыми)
+    # Подготовка: качественное сглаживание
     smooth = cv2.bilateralFilter(gray, 9, 75, 75)
-    
-    # 2. Постеризация (Делим на N уровней)
-    # Формула: схлопываем 256 оттенков в заданное количество уровней
+
+    # === СЛОЙ 1: ТОПОГРАФИЯ (Градация) ===
     factor = 255 // (num_levels - 1)
     quantized = (smooth // factor) * factor
-    
-    # 3. Поиск границ между уровнями (Контуры зон)
-    # Используем морфологический градиент — это дает тонкую линию на стыке цветов
-    kernel = np.ones((3,3), np.uint8)
-    stencil_mask = cv2.morphologyEx(quantized, cv2.MORPH_GRADIENT, kernel)
-    
-    # Делаем маску бинарной (черно-белой)
-    _, stencil_mask = cv2.threshold(stencil_mask, 1, 255, cv2.THRESH_BINARY)
+    kernel_grad = np.ones((3,3), np.uint8)
+    topo_edges = cv2.morphologyEx(quantized, cv2.MORPH_GRADIENT, kernel_grad)
+    _, topo_edges = cv2.threshold(topo_edges, 1, 255, cv2.THRESH_BINARY)
 
-    # 4. ФИЛЬТР МУСОРА ПО РАЗМЕРУ (в мм)
-    # Считаем, сколько пикселей в 1 мм исходя из выбранной ширины печати
+    # === СЛОЙ 2: АНАТОМИЯ (DoG для пропущенных деталей) ===
+    if anatomy_boost > 0:
+        # Ищем детали среднего размера (мышцы, перья)
+        g1 = cv2.GaussianBlur(gray, (3, 3), 0)
+        g2 = cv2.GaussianBlur(gray, (15, 15), 0)
+        dog = cv2.subtract(g2, g1)
+        # Чем выше anatomy_boost, тем больше деталей проявляется
+        threshold_val = 50 - (anatomy_boost // 2)
+        threshold_val = max(5, threshold_val) # Защита от слишком низкого порога
+        _, anatomy_edges = cv2.threshold(dog, threshold_val, 255, cv2.THRESH_BINARY)
+    else:
+        anatomy_edges = np.zeros_like(gray)
+
+    # === ОБЪЕДИНЕНИЕ СЛОЕВ ===
+    combined = cv2.bitwise_or(topo_edges, anatomy_edges)
+
+    # === ФИНАЛЬНЫЙ ФИЛЬТР МУСОРА ПО РАЗМЕРУ (в мм) ===
     h_px, w_px = gray.shape
     px_per_mm = w_px / (target_width_cm * 10)
-    # Минимальная площадь объекта в пикселях (мм^2)
     min_area_px = (min_size_mm * px_per_mm) ** 2
 
-    # Удаляем мелкие точки и "шум"
-    nb_components, output, stats, _ = cv2.connectedComponentsWithStats(stencil_mask, connectivity=8)
-    final_stencil = np.zeros(stencil_mask.shape, dtype=np.uint8)
+    nb_components, output, stats, _ = cv2.connectedComponentsWithStats(combined, connectivity=8)
+    final_stencil = np.zeros(combined.shape, dtype=np.uint8)
     
     for i in range(1, nb_components):
         if stats[i, cv2.CC_STAT_AREA] >= min_area_px:
@@ -75,7 +84,7 @@ if uploaded_file:
     blended = cv2.addWeighted(img_array, alpha, white_bg, 1 - alpha, 0)
     blended[final_stencil > 0] = sel_color
 
-    st.image(blended, caption=f"Стенсил: {num_levels} уровней градации", use_column_width=True)
+    st.image(blended, caption=f"Гибридный стенсил: Градация + Анатомия", use_column_width=True)
 
     # --- ГЕНЕРАЦИЯ PDF ---
     def create_pdf(mask, width, color_rgb):
